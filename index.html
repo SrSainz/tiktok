@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Clip Studio ES</title>
+    <style>
+      :root {
+        --bg: #0b1220;
+        --card: #111b2f;
+        --line: #2b3b57;
+        --text: #ecf2ff;
+        --muted: #9fb0d0;
+        --accent: #3d8cff;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        font-family: "Segoe UI", system-ui, sans-serif;
+        background: radial-gradient(circle at top, #162748 0%, var(--bg) 55%);
+        color: var(--text);
+        min-height: 100vh;
+      }
+      .wrap {
+        max-width: 900px;
+        margin: 0 auto;
+        padding: 40px 20px;
+      }
+      .card {
+        background: color-mix(in srgb, var(--card) 92%, black);
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        padding: 24px;
+      }
+      h1 {
+        margin: 0 0 6px;
+        font-size: 36px;
+      }
+      p {
+        color: var(--muted);
+        line-height: 1.5;
+      }
+      code {
+        background: #0a1322;
+        border: 1px solid #233454;
+        padding: 2px 6px;
+        border-radius: 6px;
+      }
+      .list {
+        margin: 16px 0 0;
+        padding-left: 18px;
+      }
+      .list li {
+        margin: 8px 0;
+      }
+      a {
+        color: var(--accent);
+      }
+    </style>
+  </head>
+  <body>
+    <main class="wrap">
+      <section class="card">
+        <h1>Clip Studio ES</h1>
+        <p>
+          Este repositorio es principalmente una app de escritorio (Python/Tkinter + scripts de video).
+          El deploy en Vercel queda configurado para evitar errores de <code>react-scripts build</code>.
+        </p>
+        <ul class="list">
+          <li>GUI local: <code>python scripts/clip_studio_gui.py</code></li>
+          <li>TikTok Direct Post API: <code>python scripts/tiktok_direct_post_api.py -h</code></li>
+          <li>Variables: <code>TIKTOK_CLIENT_KEY</code>, <code>TIKTOK_CLIENT_SECRET</code>, <code>TIKTOK_REDIRECT_URI</code></li>
+        </ul>
+        <p>
+          Repositorio: <a href="https://github.com/SrSainz/tiktok">github.com/SrSainz/tiktok</a>
+        </p>
+      </section>
+    </main>
+  </body>
+</html>
