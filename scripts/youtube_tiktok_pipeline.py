@@ -503,6 +503,8 @@ def discover_from_channels(channels: List[str], per_channel_scan: int) -> List[V
         log(f"Escaneando canal: {channel_url}")
         opts = dict(yt_base_opts())
         opts["playlistend"] = max(1, int(per_channel_scan))
+        # Channel scans need playlist/tab traversal. Keep this False here.
+        opts["noplaylist"] = False
         with yt_dlp.YoutubeDL(opts) as ydl:
             try:
                 info = ydl.extract_info(channel_url, download=False)
@@ -710,6 +712,9 @@ def render_short(
     cmd = [
         ffmpeg_bin,
         "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
         "-ss",
         f"{segment.start:.3f}",
         "-i",
@@ -722,24 +727,81 @@ def render_short(
         "loudnorm=I=-16:TP=-1.5:LRA=11",
         "-r",
         "30",
+        "-threads",
+        "2",
         "-c:v",
         "libx264",
         "-preset",
-        "medium",
+        "veryfast",
         "-crf",
-        "20",
+        "21",
+        "-pix_fmt",
+        "yuv420p",
         "-c:a",
         "aac",
+        "-ar",
+        "48000",
         "-b:a",
-        "160k",
+        "128k",
         "-movflags",
         "+faststart",
         str(output_video.name),
     ]
 
     proc = subprocess.run(cmd, cwd=input_video.parent, capture_output=True, text=True)
-    if proc.returncode != 0:
-        raise RuntimeError(f"ffmpeg fallo:\n{proc.stderr[-2000:]}")
+    if proc.returncode == 0:
+        return
+
+    # Fallback for constrained hosts (Railway-like): lower resolution + lighter encode.
+    fallback_filters = [
+        "scale=720:1280:force_original_aspect_ratio=increase",
+        "crop=720:1280",
+    ]
+    fallback_cmd = [
+        ffmpeg_bin,
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-ss",
+        f"{segment.start:.3f}",
+        "-i",
+        str(input_video.name),
+        "-t",
+        f"{segment.end - segment.start:.3f}",
+        "-vf",
+        ",".join(fallback_filters),
+        "-af",
+        "loudnorm=I=-16:TP=-1.5:LRA=11",
+        "-r",
+        "24",
+        "-threads",
+        "1",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-crf",
+        "24",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-ar",
+        "44100",
+        "-b:a",
+        "96k",
+        "-movflags",
+        "+faststart",
+        str(output_video.name),
+    ]
+    proc_fb = subprocess.run(fallback_cmd, cwd=input_video.parent, capture_output=True, text=True)
+    if proc_fb.returncode != 0:
+        raise RuntimeError(
+            "ffmpeg fallo (modo normal + fallback):\n"
+            f"-- normal rc={proc.returncode} --\n{(proc.stderr or '')[-1800:]}\n"
+            f"-- fallback rc={proc_fb.returncode} --\n{(proc_fb.stderr or '')[-1800:]}"
+        )
 
 
 def upload_to_tiktok_playwright(

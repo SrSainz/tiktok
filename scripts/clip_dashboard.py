@@ -30,6 +30,7 @@ from youtube_tiktok_pipeline import (
     enrich_candidates,
     is_within_last_days,
     discover_from_channels,
+    discover_from_search,
     parse_vtt,
     pick_hook,
     render_short,
@@ -211,6 +212,10 @@ def discover_creator_videos(
     channels = channels or list(DEFAULT_CREATOR_CHANNELS)
     _log(f"Escaneando {len(channels)} canales...")
     candidates = discover_from_channels(channels, per_channel_scan=per_channel_scan)
+    if not candidates:
+        _log("Sin resultados por canales. Probando fallback de busqueda...")
+        search_q = "TheGrefg AuronPlay Ibai YoSoyPlex elrubius"
+        candidates = discover_from_search(search_q, search_limit=max(30, max_results * 4))
     _log(f"Candidatos brutos: {len(candidates)}")
     enrich_limit = min(len(candidates), max(max_results * 2, 20))
     _log(f"Enriqueciendo metadatos de {enrich_limit} videos...")
@@ -225,6 +230,24 @@ def discover_creator_videos(
         if this_week_only and not is_within_last_days(c.upload_date, days=7, today=today):
             continue
         filtered.append(c)
+
+    if this_week_only and not filtered:
+        _log("Sin resultados de esta semana. Relaxing filtro temporal (ultimos 30 dias).")
+        for c in candidates:
+            if (c.duration or 0) < min_source_duration:
+                continue
+            c.views_per_day = compute_views_per_day(c.view_count, c.upload_date, today=today)
+            if not is_within_last_days(c.upload_date, days=30, today=today):
+                continue
+            filtered.append(c)
+
+    if not filtered:
+        _log("Sin resultados con filtro de fecha. Mostrando mejores candidatos disponibles.")
+        for c in candidates:
+            if (c.duration or 0) < min_source_duration:
+                continue
+            c.views_per_day = compute_views_per_day(c.view_count, c.upload_date, today=today)
+            filtered.append(c)
 
     if filtered:
         raw_scores: List[float] = []
