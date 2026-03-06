@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# Local env / secrets
+.env
+.env.*
+.tiktok_tokens.json
+*.pem
+*.key
+*.crt
+
+# Browser/profile/session data
+.tiktok_profile/
+
+# Build artifacts
+build/
+dist/
+*.spec.bak
+
+# Generated media/work folders
+output/
+work/
+work_new/
+work_new2/
+work_new3/
+work_new4/
+scripts/output/
+scripts/work/
+tiktoks/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

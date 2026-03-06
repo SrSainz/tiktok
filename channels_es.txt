@@ -1,0 +1,7 @@
+# Edit this list with channels you want to scan.
+# Use full URLs pointing to each channel videos tab.
+https://www.youtube.com/@Ibai/videos
+https://www.youtube.com/@elrubiusOMG/videos
+https://www.youtube.com/@VEGETTA777/videos
+https://www.youtube.com/@AuronPlay/videos
+https://www.youtube.com/@Mikecrack/videos

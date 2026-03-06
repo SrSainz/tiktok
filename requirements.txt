@@ -1,0 +1,5 @@
+yt-dlp>=2026.1.1
+imageio-ffmpeg>=0.5.1
+webvtt-py>=0.5.1
+playwright>=1.54.0
+requests>=2.32.0
