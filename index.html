@@ -305,6 +305,7 @@
         jobId: "",
         logCursor: 0,
         pollTimer: null,
+        pollFailures: 0,
         candidates: [],
         selectedCandidateIdx: -1
       };
@@ -342,11 +343,14 @@
         if (!state.backend) {
           throw new Error("Configura primero la URL del backend.");
         }
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 20000);
         const res = await fetch(`${state.backend}${path}`, {
           method: payload ? "POST" : "GET",
           headers: payload ? { "Content-Type": "application/json" } : undefined,
-          body: payload ? JSON.stringify(payload) : undefined
-        });
+          body: payload ? JSON.stringify(payload) : undefined,
+          signal: controller.signal
+        }).finally(() => clearTimeout(timeout));
         const data = await res.json().catch(() => ({}));
         if (!res.ok) {
           throw new Error(data.detail || `HTTP ${res.status}`);
@@ -400,6 +404,7 @@
           clearInterval(state.pollTimer);
           state.pollTimer = null;
         }
+        state.pollFailures = 0;
       }
 
       function appendLogs(lines) {
@@ -443,6 +448,7 @@
         }
         try {
           const data = await api(`/api/jobs/${state.jobId}?since_log=${state.logCursor}`);
+          state.pollFailures = 0;
           state.logCursor = Number(data.next_log_cursor || state.logCursor);
           appendLogs(data.logs || []);
           setStatus(ui.jobStatus, `Estado job: ${data.status}`, data.status === "failed");
@@ -453,8 +459,13 @@
             clearPolling();
           }
         } catch (err) {
-          clearPolling();
-          setStatus(ui.jobStatus, `Error polling: ${err.message}`, true);
+          state.pollFailures += 1;
+          if (state.pollFailures >= 8) {
+            clearPolling();
+            setStatus(ui.jobStatus, `Error polling persistente: ${err.message}`, true);
+          } else {
+            setStatus(ui.jobStatus, `Corte temporal (${state.pollFailures}/8), reintentando...`, false);
+          }
         }
       }
 
@@ -478,6 +489,7 @@
           const data = await api("/api/jobs", payload);
           state.jobId = data.job_id;
           state.logCursor = 0;
+          state.pollFailures = 0;
           setStatus(ui.jobStatus, `Job creado: ${state.jobId}`, false);
           clearPolling();
           state.pollTimer = setInterval(pollJob, 2500);
