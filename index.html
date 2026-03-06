@@ -3,80 +3,511 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Clip Studio ES</title>
+    <title>Clip Studio ES Web</title>
     <style>
       :root {
-        --bg: #0b1220;
-        --card: #111b2f;
-        --line: #2b3b57;
-        --text: #ecf2ff;
-        --muted: #9fb0d0;
-        --accent: #3d8cff;
+        --bg: #081225;
+        --bg-2: #101d36;
+        --card: #111f3c;
+        --card-2: #0d1930;
+        --line: #284067;
+        --text: #e8efff;
+        --muted: #9cb0d6;
+        --accent: #44b0ff;
+        --accent-2: #4df9b8;
+        --danger: #ff7272;
       }
       * {
         box-sizing: border-box;
       }
       body {
         margin: 0;
-        font-family: "Segoe UI", system-ui, sans-serif;
-        background: radial-gradient(circle at top, #162748 0%, var(--bg) 55%);
-        color: var(--text);
         min-height: 100vh;
+        background: radial-gradient(circle at 20% 0%, #1f3261 0%, var(--bg) 38%, #050b18 100%);
+        color: var(--text);
+        font-family: "Segoe UI", system-ui, sans-serif;
       }
-      .wrap {
-        max-width: 900px;
+      .container {
+        max-width: 1220px;
         margin: 0 auto;
-        padding: 40px 20px;
+        padding: 26px 16px 40px;
       }
-      .card {
-        background: color-mix(in srgb, var(--card) 92%, black);
+      .hero {
         border: 1px solid var(--line);
-        border-radius: 14px;
-        padding: 24px;
+        border-radius: 18px;
+        padding: 20px;
+        background: linear-gradient(140deg, rgba(24, 41, 76, 0.92), rgba(8, 17, 34, 0.92));
+        margin-bottom: 14px;
       }
       h1 {
-        margin: 0 0 6px;
-        font-size: 36px;
+        margin: 0 0 4px;
+        font-size: 38px;
+        letter-spacing: 0.3px;
       }
-      p {
+      .muted {
         color: var(--muted);
-        line-height: 1.5;
       }
-      code {
-        background: #0a1322;
-        border: 1px solid #233454;
-        padding: 2px 6px;
-        border-radius: 6px;
+      .grid {
+        display: grid;
+        grid-template-columns: 380px 1fr;
+        gap: 14px;
+      }
+      .panel {
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        background: linear-gradient(180deg, var(--card) 0%, var(--card-2) 100%);
+        padding: 14px;
+      }
+      .panel h2 {
+        margin: 0 0 10px;
+        font-size: 19px;
+      }
+      label {
+        display: block;
+        margin: 10px 0 6px;
+        color: #cad7f3;
+        font-size: 13px;
+      }
+      input,
+      select,
+      button,
+      textarea {
+        width: 100%;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: #081429;
+        color: var(--text);
+        padding: 10px;
+        font-size: 14px;
+      }
+      input::placeholder {
+        color: #7f95c1;
+      }
+      .row {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+      }
+      .inline {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-top: 8px;
+      }
+      .inline input {
+        width: auto;
+      }
+      .btn {
+        cursor: pointer;
+        background: linear-gradient(90deg, var(--accent), #5295ff);
+        border: 0;
+        font-weight: 600;
+      }
+      .btn.secondary {
+        background: linear-gradient(90deg, #304d7f, #4368a7);
+      }
+      .btn.green {
+        background: linear-gradient(90deg, #2f9f89, var(--accent-2));
+        color: #071521;
+      }
+      .status {
+        margin-top: 10px;
+        padding: 8px 10px;
+        border: 1px solid #365683;
+        border-radius: 10px;
+        background: #08162d;
+        font-size: 13px;
+      }
+      .status.error {
+        border-color: #8a3a3a;
+        color: #ffb3b3;
+        background: #2a1218;
       }
       .list {
-        margin: 16px 0 0;
-        padding-left: 18px;
+        margin-top: 12px;
+        max-height: 310px;
+        overflow: auto;
+        border: 1px solid var(--line);
+        border-radius: 12px;
       }
-      .list li {
-        margin: 8px 0;
+      .item {
+        padding: 10px;
+        border-bottom: 1px solid #1f3252;
+        cursor: pointer;
       }
-      a {
-        color: var(--accent);
+      .item:hover {
+        background: #0e1f3c;
+      }
+      .item.active {
+        background: #163464;
+      }
+      .item .title {
+        font-size: 14px;
+        font-weight: 600;
+      }
+      .item .meta {
+        color: var(--muted);
+        font-size: 12px;
+        margin-top: 3px;
+      }
+      .logs {
+        margin-top: 12px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: #060f21;
+        height: 170px;
+        overflow: auto;
+        padding: 8px;
+        font-family: Consolas, monospace;
+        font-size: 12px;
+        white-space: pre-wrap;
+      }
+      .results {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+        gap: 12px;
+      }
+      .clip {
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        overflow: hidden;
+        background: #0a1630;
+      }
+      .clip video {
+        width: 100%;
+        display: block;
+        background: black;
+      }
+      .clip .body {
+        padding: 10px;
+      }
+      .pill {
+        display: inline-block;
+        font-size: 11px;
+        padding: 3px 7px;
+        border-radius: 999px;
+        background: #112a50;
+        margin-right: 5px;
+        margin-bottom: 6px;
+      }
+      .clip .desc {
+        font-size: 13px;
+        color: #d3e0fb;
+        min-height: 40px;
+      }
+      .clip .why {
+        font-size: 12px;
+        color: #98afd8;
+        margin-top: 5px;
+      }
+      .clip .links {
+        margin-top: 10px;
+        display: flex;
+        gap: 8px;
+      }
+      .clip a {
+        flex: 1;
+        color: #07243e;
+        text-decoration: none;
+        text-align: center;
+        background: #77c3ff;
+        padding: 7px 8px;
+        border-radius: 8px;
+        font-size: 12px;
+        font-weight: 600;
+      }
+      .clip a.secondary {
+        background: #90e7c6;
+      }
+      @media (max-width: 980px) {
+        .grid {
+          grid-template-columns: 1fr;
+        }
       }
     </style>
   </head>
   <body>
-    <main class="wrap">
-      <section class="card">
-        <h1>Clip Studio ES</h1>
-        <p>
-          Este repositorio es principalmente una app de escritorio (Python/Tkinter + scripts de video).
-          El deploy en Vercel queda configurado para evitar errores de <code>react-scripts build</code>.
-        </p>
-        <ul class="list">
-          <li>GUI local: <code>python scripts/clip_studio_gui.py</code></li>
-          <li>TikTok Direct Post API: <code>python scripts/tiktok_direct_post_api.py -h</code></li>
-          <li>Variables: <code>TIKTOK_CLIENT_KEY</code>, <code>TIKTOK_CLIENT_SECRET</code>, <code>TIKTOK_REDIRECT_URI</code></li>
-        </ul>
-        <p>
-          Repositorio: <a href="https://github.com/SrSainz/tiktok">github.com/SrSainz/tiktok</a>
-        </p>
+    <main class="container">
+      <section class="hero">
+        <h1>Clip Studio ES Web</h1>
+        <div class="muted">Estilo Opus: descubre virales, genera opciones de clips y elige cuál subir.</div>
+      </section>
+
+      <section class="grid">
+        <aside class="panel">
+          <h2>Configuración</h2>
+          <label for="backendUrl">Backend URL (Railway)</label>
+          <input id="backendUrl" placeholder="https://tu-backend.up.railway.app" />
+          <div class="row">
+            <button class="btn secondary" id="saveBackendBtn">Guardar URL</button>
+            <button class="btn secondary" id="healthBtn">Probar conexión</button>
+          </div>
+          <div id="healthStatus" class="status">Sin comprobar</div>
+
+          <h2 style="margin-top: 14px">Descubrir virales</h2>
+          <div class="row">
+            <div>
+              <label for="scanInput">Scan/canal</label>
+              <input id="scanInput" type="number" min="5" max="50" value="12" />
+            </div>
+            <div>
+              <label for="limitInput">Límite</label>
+              <input id="limitInput" type="number" min="1" max="50" value="12" />
+            </div>
+          </div>
+          <div class="inline">
+            <input id="weekOnly" type="checkbox" checked />
+            <span class="muted">Solo videos de esta semana</span>
+          </div>
+          <button class="btn" id="discoverBtn" style="margin-top: 10px">Buscar virales</button>
+          <div id="discoverStatus" class="status">Pulsa para cargar candidatos.</div>
+          <div id="candidateList" class="list"></div>
+        </aside>
+
+        <section class="panel">
+          <h2>Generar opciones</h2>
+          <label for="urlInput">URL de YouTube</label>
+          <input id="urlInput" placeholder="https://www.youtube.com/watch?v=..." />
+          <div class="row">
+            <div>
+              <label for="durationInput">Duración clip (s)</label>
+              <input id="durationInput" type="number" min="20" max="90" value="60" />
+            </div>
+            <div>
+              <label for="optionsInput">Número de opciones</label>
+              <input id="optionsInput" type="number" min="2" max="12" value="6" />
+            </div>
+          </div>
+          <div class="row">
+            <div>
+              <label for="strideInput">Stride (s)</label>
+              <input id="strideInput" type="number" min="5" max="30" value="10" />
+            </div>
+            <div>
+              <label for="overlapInput">Overlap (0.10-0.80)</label>
+              <input id="overlapInput" type="number" min="0.1" max="0.8" step="0.05" value="0.40" />
+            </div>
+          </div>
+          <button class="btn green" id="generateBtn" style="margin-top: 10px">Generar clips</button>
+          <div id="jobStatus" class="status">Sin job activo.</div>
+          <div id="jobLogs" class="logs"></div>
+
+          <h2 style="margin-top: 14px">Opciones generadas</h2>
+          <div id="resultMeta" class="muted" style="margin-bottom: 8px">Aún no hay resultados.</div>
+          <div id="results" class="results"></div>
+        </section>
       </section>
     </main>
+
+    <script>
+      const state = {
+        backend: "",
+        jobId: "",
+        logCursor: 0,
+        pollTimer: null,
+        candidates: [],
+        selectedCandidateIdx: -1
+      };
+
+      const $ = (id) => document.getElementById(id);
+
+      const ui = {
+        backendUrl: $("backendUrl"),
+        healthStatus: $("healthStatus"),
+        discoverStatus: $("discoverStatus"),
+        candidateList: $("candidateList"),
+        urlInput: $("urlInput"),
+        jobStatus: $("jobStatus"),
+        jobLogs: $("jobLogs"),
+        resultMeta: $("resultMeta"),
+        results: $("results")
+      };
+
+      function setStatus(el, text, isError = false) {
+        el.textContent = text;
+        el.classList.toggle("error", Boolean(isError));
+      }
+
+      function normalizeBackend(url) {
+        return (url || "").trim().replace(/\/+$/, "");
+      }
+
+      function saveBackendUrl() {
+        state.backend = normalizeBackend(ui.backendUrl.value);
+        localStorage.setItem("clip_backend_url", state.backend);
+        setStatus(ui.healthStatus, state.backend ? `Backend guardado: ${state.backend}` : "Backend vacio", !state.backend);
+      }
+
+      async function api(path, payload) {
+        if (!state.backend) {
+          throw new Error("Configura primero la URL del backend.");
+        }
+        const res = await fetch(`${state.backend}${path}`, {
+          method: payload ? "POST" : "GET",
+          headers: payload ? { "Content-Type": "application/json" } : undefined,
+          body: payload ? JSON.stringify(payload) : undefined
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          throw new Error(data.detail || `HTTP ${res.status}`);
+        }
+        return data;
+      }
+
+      function renderCandidates() {
+        ui.candidateList.innerHTML = "";
+        state.candidates.forEach((item, idx) => {
+          const row = document.createElement("div");
+          row.className = `item ${idx === state.selectedCandidateIdx ? "active" : ""}`;
+          const views = Number(item.view_count || 0).toLocaleString("es-ES");
+          const vpd = Number(item.views_per_day || 0).toLocaleString("es-ES", { maximumFractionDigits: 0 });
+          row.innerHTML = `
+            <div class="title">${idx + 1}. ${item.title}</div>
+            <div class="meta">AI ${Number(item.ai_score || 0).toFixed(1)} | ${item.channel || "Canal"} | ${views} views | ${vpd}/dia</div>
+          `;
+          row.onclick = () => {
+            state.selectedCandidateIdx = idx;
+            ui.urlInput.value = item.url;
+            renderCandidates();
+          };
+          ui.candidateList.appendChild(row);
+        });
+      }
+
+      async function discover() {
+        try {
+          setStatus(ui.discoverStatus, "Buscando videos...", false);
+          const payload = {
+            per_channel_scan: Number($("scanInput").value || 12),
+            max_results: Number($("limitInput").value || 12),
+            this_week_only: Boolean($("weekOnly").checked)
+          };
+          const data = await api("/api/discover", payload);
+          state.candidates = data.items || [];
+          state.selectedCandidateIdx = state.candidates.length ? 0 : -1;
+          if (state.candidates.length) {
+            ui.urlInput.value = state.candidates[0].url;
+          }
+          renderCandidates();
+          setStatus(ui.discoverStatus, `Encontrados ${state.candidates.length} candidatos.`, false);
+        } catch (err) {
+          setStatus(ui.discoverStatus, `Error discovery: ${err.message}`, true);
+        }
+      }
+
+      function clearPolling() {
+        if (state.pollTimer) {
+          clearInterval(state.pollTimer);
+          state.pollTimer = null;
+        }
+      }
+
+      function appendLogs(lines) {
+        if (!lines || !lines.length) {
+          return;
+        }
+        ui.jobLogs.textContent += (ui.jobLogs.textContent ? "\n" : "") + lines.join("\n");
+        ui.jobLogs.scrollTop = ui.jobLogs.scrollHeight;
+      }
+
+      function renderResults(result) {
+        const options = result?.options || [];
+        ui.resultMeta.textContent = `${result?.source_title || "Video"} | ${options.length} opciones`;
+        ui.results.innerHTML = "";
+        options.forEach((opt) => {
+          const card = document.createElement("article");
+          card.className = "clip";
+          const preview = opt.preview_url ? `<video controls preload="metadata" src="${opt.preview_url}"></video>` : "";
+          card.innerHTML = `
+            ${preview}
+            <div class="body">
+              <div class="pill">Option ${opt.option_id}</div>
+              <div class="pill">Score ${Number(opt.score).toFixed(1)}</div>
+              <div class="pill">Interest ${Number(opt.interest_score).toFixed(1)}</div>
+              <div class="pill">Reach ${Number(opt.reach_score).toFixed(1)}</div>
+              <div class="desc">${opt.short_description || ""}</div>
+              <div class="why">${opt.why_it_may_work || ""}</div>
+              <div class="links">
+                ${opt.preview_url ? `<a href="${opt.preview_url}" target="_blank" rel="noreferrer">Preview</a>` : ""}
+                ${opt.manual_upload_url ? `<a class="secondary" href="${opt.manual_upload_url}" target="_blank" rel="noreferrer">Descargar</a>` : ""}
+              </div>
+            </div>
+          `;
+          ui.results.appendChild(card);
+        });
+      }
+
+      async function pollJob() {
+        if (!state.jobId) {
+          return;
+        }
+        try {
+          const data = await api(`/api/jobs/${state.jobId}?since_log=${state.logCursor}`);
+          state.logCursor = Number(data.next_log_cursor || state.logCursor);
+          appendLogs(data.logs || []);
+          setStatus(ui.jobStatus, `Estado job: ${data.status}`, data.status === "failed");
+          if (data.status === "completed") {
+            clearPolling();
+            renderResults(data.result);
+          } else if (data.status === "failed") {
+            clearPolling();
+          }
+        } catch (err) {
+          clearPolling();
+          setStatus(ui.jobStatus, `Error polling: ${err.message}`, true);
+        }
+      }
+
+      async function createJob() {
+        const url = ui.urlInput.value.trim();
+        if (!url || (!url.includes("youtube.com") && !url.includes("youtu.be"))) {
+          setStatus(ui.jobStatus, "Pega una URL válida de YouTube.", true);
+          return;
+        }
+        try {
+          ui.jobLogs.textContent = "";
+          ui.results.innerHTML = "";
+          ui.resultMeta.textContent = "Procesando...";
+          const payload = {
+            url,
+            duration: Number($("durationInput").value || 60),
+            options: Number($("optionsInput").value || 6),
+            stride: Number($("strideInput").value || 10),
+            overlap_ratio: Number($("overlapInput").value || 0.4)
+          };
+          const data = await api("/api/jobs", payload);
+          state.jobId = data.job_id;
+          state.logCursor = 0;
+          setStatus(ui.jobStatus, `Job creado: ${state.jobId}`, false);
+          clearPolling();
+          state.pollTimer = setInterval(pollJob, 2500);
+          await pollJob();
+        } catch (err) {
+          setStatus(ui.jobStatus, `Error creando job: ${err.message}`, true);
+        }
+      }
+
+      async function checkHealth() {
+        try {
+          const data = await api("/api/health");
+          setStatus(ui.healthStatus, `OK: ${data.service}`, false);
+        } catch (err) {
+          setStatus(ui.healthStatus, `Error backend: ${err.message}`, true);
+        }
+      }
+
+      $("saveBackendBtn").onclick = saveBackendUrl;
+      $("healthBtn").onclick = checkHealth;
+      $("discoverBtn").onclick = discover;
+      $("generateBtn").onclick = createJob;
+
+      (function init() {
+        state.backend = normalizeBackend(localStorage.getItem("clip_backend_url") || "");
+        ui.backendUrl.value = state.backend;
+        if (state.backend) {
+          setStatus(ui.healthStatus, `Backend cargado: ${state.backend}`, false);
+        }
+      })();
+    </script>
   </body>
 </html>

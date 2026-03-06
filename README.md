@@ -207,6 +207,43 @@ Resultado:
 
 - `dist/ClipStudioES/ClipStudioES.exe`
 
+## Version web (Vercel + Railway)
+
+Arquitectura recomendada:
+
+- Frontend en Vercel (archivo `index.html`).
+- Backend de procesamiento en Railway (`backend/app.py`).
+
+### 1) Deploy backend en Railway
+
+Desde este mismo repo:
+
+- Start command: `uvicorn backend.app:app --host 0.0.0.0 --port $PORT`
+- Variables:
+  - `CORS_ORIGINS=https://TU_FRONTEND.vercel.app`
+  - `BACKEND_PUBLIC_URL=https://TU_BACKEND.up.railway.app`
+  - `OUTPUT_DIR=/data/output` (opcional)
+  - `WORK_DIR=/data/work` (opcional)
+
+Endpoints backend:
+
+- `GET /api/health`
+- `POST /api/discover`
+- `POST /api/jobs`
+- `GET /api/jobs/{job_id}`
+- `GET /output/...` (clips generados)
+
+### 2) Deploy frontend en Vercel
+
+Ya incluido en el repo (`vercel.json` + `index.html`).
+
+En la web:
+
+1. Pega la URL del backend (Railway) en `Backend URL`.
+2. Pulsa `Probar conexion`.
+3. `Buscar virales`.
+4. Selecciona URL y `Generar clips`.
+
 ## Parametros utiles
 
 - `--duration 30` o `--duration 60`
