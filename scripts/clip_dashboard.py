@@ -324,7 +324,7 @@ def _run_ffmpeg_stream(
     return proc.wait()
 
 
-def analyze_scene_changes(ffmpeg_bin: str, source_video: Path) -> List[float]:
+def analyze_scene_changes(ffmpeg_bin: str, source_video: Path, max_seconds: int = 900) -> List[float]:
     # Detect significant frame differences as scene cuts.
     times: List[float] = []
 
@@ -344,6 +344,8 @@ def analyze_scene_changes(ffmpeg_bin: str, source_video: Path) -> List[float]:
             "-nostats",
             "-i",
             str(source_video),
+            "-t",
+            str(max(60, int(max_seconds))),
             "-vf",
             "select='gt(scene,0.34)',showinfo",
             "-an",
@@ -358,7 +360,7 @@ def analyze_scene_changes(ffmpeg_bin: str, source_video: Path) -> List[float]:
     return sorted(times)
 
 
-def analyze_audio_energy(ffmpeg_bin: str, source_video: Path) -> dict[int, float]:
+def analyze_audio_energy(ffmpeg_bin: str, source_video: Path, max_seconds: int = 900) -> dict[int, float]:
     # Build per-second loudness map using astats RMS level.
     rms_by_second: dict[int, float] = {}
     current_t = 0.0
@@ -393,6 +395,8 @@ def analyze_audio_energy(ffmpeg_bin: str, source_video: Path) -> dict[int, float
             "-nostats",
             "-i",
             str(source_video),
+            "-t",
+            str(max(60, int(max_seconds))),
             "-vn",
             "-af",
             "astats=metadata=1:reset=1,ametadata=print:file=-",
@@ -902,12 +906,13 @@ def generate_dashboard(config: DashboardConfig, log_fn: Callable[[str], None] = 
 
     # Signal analysis for stronger clip ranking.
     log_fn("Analizando dinamica de audio y ritmo visual...")
+    analysis_seconds = int(min(max(180.0, source_duration), 900.0))
     try:
-        rms_by_second = analyze_audio_energy(ffmpeg_bin, source_video)
+        rms_by_second = analyze_audio_energy(ffmpeg_bin, source_video, max_seconds=analysis_seconds)
     except Exception:
         rms_by_second = {}
     try:
-        scene_times = analyze_scene_changes(ffmpeg_bin, source_video)
+        scene_times = analyze_scene_changes(ffmpeg_bin, source_video, max_seconds=analysis_seconds)
     except Exception:
         scene_times = []
 
