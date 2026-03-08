@@ -231,6 +231,26 @@ def discover_creator_videos(
             continue
         filtered.append(c)
 
+    if this_week_only and filtered:
+        # If weekly results are dominated by a single creator, widen to 30 days
+        # to recover channel diversity without dropping virality sorting.
+        seen_video_ids = {c.video_id for c in filtered if c.video_id}
+        unique_week_channels = {_channel_key(c) for c in filtered}
+        target_diverse_channels = max(2, min(4, max_results))
+        if len(unique_week_channels) < target_diverse_channels:
+            _log("Poca diversidad esta semana; ampliando candidatos a ultimos 30 dias.")
+            for c in candidates:
+                if (c.duration or 0) < min_source_duration:
+                    continue
+                if c.video_id and c.video_id in seen_video_ids:
+                    continue
+                if not is_within_last_days(c.upload_date, days=30, today=today):
+                    continue
+                c.views_per_day = compute_views_per_day(c.view_count, c.upload_date, today=today)
+                filtered.append(c)
+                if c.video_id:
+                    seen_video_ids.add(c.video_id)
+
     if this_week_only and not filtered:
         _log("Sin resultados de esta semana. Relaxing filtro temporal (ultimos 30 dias).")
         for c in candidates:
