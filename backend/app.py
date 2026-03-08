@@ -54,11 +54,18 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 WORK_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def _cookie_file_is_usable(path: str) -> bool:
+    if not path:
+        return False
+    p = Path(path)
+    return p.exists() and p.is_file() and p.stat().st_size > 0
+
+
 def _resolve_cookies_file() -> str:
     """Resolve cookie file path from file var or inline text var."""
     global YTDLP_COOKIES_FILE
     file_path = YTDLP_COOKIES_FILE.strip()
-    if file_path and Path(file_path).exists():
+    if _cookie_file_is_usable(file_path):
         return file_path
 
     if YTDLP_COOKIES_TEXT.strip():
@@ -244,7 +251,7 @@ def health() -> dict[str, Any]:
         "output_dir": str(OUTPUT_DIR),
         "work_dir": str(WORK_DIR),
         "cookies_configured": bool(YTDLP_COOKIES_FILE),
-        "cookies_file_exists": bool(Path(YTDLP_COOKIES_FILE).exists()) if YTDLP_COOKIES_FILE else False,
+        "cookies_file_exists": _cookie_file_is_usable(YTDLP_COOKIES_FILE),
         "cookies_inline_configured": bool(YTDLP_COOKIES_TEXT.strip()),
     }
 
