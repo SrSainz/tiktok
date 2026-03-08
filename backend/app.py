@@ -69,11 +69,26 @@ def _resolve_cookies_file() -> str:
         return file_path
 
     if YTDLP_COOKIES_TEXT.strip():
-        inline_path = Path("/tmp/ytdlp_cookies_from_env.txt")
         text = YTDLP_COOKIES_TEXT
         # Support both real newlines and escaped "\\n".
         if "\\n" in text and "\n" not in text:
             text = text.replace("\\n", "\n")
+
+        # Prefer writing to configured cookie path (e.g. persistent /data/cookies.txt).
+        if file_path:
+            try:
+                target = Path(file_path)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(text, encoding="utf-8")
+                if _cookie_file_is_usable(str(target)):
+                    YTDLP_COOKIES_FILE = str(target)
+                    os.environ["YTDLP_COOKIES_FILE"] = YTDLP_COOKIES_FILE
+                    return YTDLP_COOKIES_FILE
+            except Exception:
+                pass
+
+        # Fallback to temporary file if target path is unavailable.
+        inline_path = Path("/tmp/ytdlp_cookies_from_env.txt")
         inline_path.write_text(text, encoding="utf-8")
         YTDLP_COOKIES_FILE = str(inline_path)
         os.environ["YTDLP_COOKIES_FILE"] = YTDLP_COOKIES_FILE
