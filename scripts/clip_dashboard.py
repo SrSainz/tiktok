@@ -301,17 +301,43 @@ ES_STOPWORDS = {
 }
 
 
-def _run_ffmpeg_capture(ffmpeg_bin: str, args: List[str], cwd: Path | None = None) -> str:
+def _run_ffmpeg_stream(
+    ffmpeg_bin: str,
+    args: List[str],
+    on_line: Callable[[str], None],
+    cwd: Path | None = None,
+) -> int:
+    """Run ffmpeg and stream combined output line-by-line."""
     cmd = [ffmpeg_bin, *args]
-    proc = subprocess.run(cmd, cwd=str(cwd) if cwd else None, capture_output=True, text=True)
-    if proc.returncode != 0:
-        return (proc.stdout or "") + "\n" + (proc.stderr or "")
-    return (proc.stdout or "") + "\n" + (proc.stderr or "")
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(cwd) if cwd else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        errors="replace",
+        bufsize=1,
+    )
+    if proc.stdout:
+        for line in proc.stdout:
+            on_line(line.rstrip("\n"))
+    return proc.wait()
 
 
 def analyze_scene_changes(ffmpeg_bin: str, source_video: Path) -> List[float]:
     # Detect significant frame differences as scene cuts.
-    raw = _run_ffmpeg_capture(
+    times: List[float] = []
+
+    def _parse_line(line: str) -> None:
+        m = re.search(r"pts_time:([0-9]+(?:\.[0-9]+)?)", line)
+        if not m:
+            return
+        try:
+            times.append(float(m.group(1)))
+        except Exception:
+            return
+
+    code = _run_ffmpeg_stream(
         ffmpeg_bin,
         [
             "-hide_banner",
@@ -325,19 +351,42 @@ def analyze_scene_changes(ffmpeg_bin: str, source_video: Path) -> List[float]:
             "null",
             "-",
         ],
+        on_line=_parse_line,
     )
-    times: List[float] = []
-    for m in re.finditer(r"pts_time:([0-9]+(?:\.[0-9]+)?)", raw):
-        try:
-            times.append(float(m.group(1)))
-        except Exception:
-            continue
+    if code != 0:
+        return []
     return sorted(times)
 
 
 def analyze_audio_energy(ffmpeg_bin: str, source_video: Path) -> dict[int, float]:
     # Build per-second loudness map using astats RMS level.
-    raw = _run_ffmpeg_capture(
+    rms_by_second: dict[int, float] = {}
+    current_t = 0.0
+
+    def _parse_line(line: str) -> None:
+        nonlocal current_t
+        t_match = re.search(r"pts_time:([0-9]+(?:\.[0-9]+)?)", line)
+        if t_match:
+            try:
+                current_t = float(t_match.group(1))
+            except Exception:
+                pass
+            return
+        r_match = re.search(r"RMS_level=([-+]?[0-9]+(?:\.[0-9]+)?)", line)
+        if not r_match:
+            return
+        try:
+            db = float(r_match.group(1))
+        except Exception:
+            return
+        if db < -120 or db > 6:
+            return
+        sec = int(max(0.0, math.floor(current_t)))
+        prev = rms_by_second.get(sec)
+        if prev is None or db > prev:
+            rms_by_second[sec] = db
+
+    code = _run_ffmpeg_stream(
         ffmpeg_bin,
         [
             "-hide_banner",
@@ -351,30 +400,10 @@ def analyze_audio_energy(ffmpeg_bin: str, source_video: Path) -> dict[int, float
             "null",
             "-",
         ],
+        on_line=_parse_line,
     )
-    rms_by_second: dict[int, float] = {}
-    current_t = 0.0
-    for line in raw.splitlines():
-        t_match = re.search(r"pts_time:([0-9]+(?:\.[0-9]+)?)", line)
-        if t_match:
-            try:
-                current_t = float(t_match.group(1))
-            except Exception:
-                pass
-            continue
-        r_match = re.search(r"RMS_level=([-+]?[0-9]+(?:\.[0-9]+)?)", line)
-        if not r_match:
-            continue
-        try:
-            db = float(r_match.group(1))
-        except Exception:
-            continue
-        if db < -120 or db > 6:
-            continue
-        sec = int(max(0.0, math.floor(current_t)))
-        prev = rms_by_second.get(sec)
-        if prev is None or db > prev:
-            rms_by_second[sec] = db
+    if code != 0:
+        return {}
     return rms_by_second
 
 
