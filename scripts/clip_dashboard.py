@@ -262,7 +262,56 @@ def discover_creator_videos(
 
     filtered.sort(key=lambda x: (x.ai_score, x.views_per_day, x.view_count), reverse=True)
     _log(f"Videos validos tras filtros: {len(filtered)}")
-    return filtered[:max_results]
+    selected = _select_diverse_by_channel(filtered, max_results=max_results)
+    channels_used = len({(c.channel or "").strip().lower() for c in selected if (c.channel or "").strip()})
+    _log(f"Seleccion final: {len(selected)} videos de {max(1, channels_used)} canales")
+    return selected
+
+
+def _channel_key(candidate: VideoCandidate) -> str:
+    key = (candidate.channel or "").strip().lower()
+    if key:
+        return key
+    # Fallback minimal when channel metadata is missing.
+    return "canal-desconocido"
+
+
+def _select_diverse_by_channel(candidates: List[VideoCandidate], max_results: int) -> List[VideoCandidate]:
+    if not candidates or max_results <= 0:
+        return []
+
+    groups: dict[str, List[VideoCandidate]] = {}
+    for c in candidates:
+        groups.setdefault(_channel_key(c), []).append(c)
+
+    ordered_channels = sorted(
+        groups.keys(),
+        key=lambda ch: (groups[ch][0].ai_score, groups[ch][0].views_per_day, groups[ch][0].view_count),
+        reverse=True,
+    )
+
+    selected: List[VideoCandidate] = []
+
+    # First pass: try at least one video per channel to avoid single-channel dominance.
+    for ch in ordered_channels:
+        if len(selected) >= max_results:
+            break
+        if groups[ch]:
+            selected.append(groups[ch].pop(0))
+
+    # Then fill remaining slots round-robin by channel quality order.
+    while len(selected) < max_results:
+        progressed = False
+        for ch in ordered_channels:
+            if len(selected) >= max_results:
+                break
+            if groups[ch]:
+                selected.append(groups[ch].pop(0))
+                progressed = True
+        if not progressed:
+            break
+
+    return selected
 
 
 INTEREST_TERMS = {
