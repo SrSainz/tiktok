@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import re
 import subprocess
 import sys
@@ -94,6 +95,35 @@ class SegmentChoice:
 
 def log(message: str) -> None:
     print(f"[pipeline] {message}")
+
+
+def _cookiefile_from_env() -> Optional[str]:
+    cookiefile = os.getenv("YTDLP_COOKIES_FILE", "").strip()
+    if not cookiefile:
+        return None
+    p = Path(cookiefile)
+    if p.exists() and p.is_file():
+        return str(p)
+    return None
+
+
+def _yt_http_headers() -> dict:
+    return {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
+    }
+
+
+def _apply_yt_auth_opts(opts: dict) -> dict:
+    opts = dict(opts)
+    opts["http_headers"] = _yt_http_headers()
+    cookiefile = _cookiefile_from_env()
+    if cookiefile:
+        opts["cookiefile"] = cookiefile
+    return opts
 
 
 def slugify(text: str, max_len: int = 70) -> str:
@@ -402,7 +432,7 @@ def write_segment_ass(cues: List[CaptionCue], start: float, end: float, out_path
 
 
 def yt_base_opts() -> dict:
-    return {
+    return _apply_yt_auth_opts({
         "quiet": True,
         "no_warnings": True,
         "noprogress": True,
@@ -412,14 +442,14 @@ def yt_base_opts() -> dict:
         "socket_timeout": 8,
         "retries": 1,
         "extractor_retries": 1,
-    }
+    })
 
 
 def enrich_candidates(candidates: List[VideoCandidate], limit: int) -> List[VideoCandidate]:
     if not candidates:
         return candidates
 
-    opts = {
+    opts = _apply_yt_auth_opts({
         "quiet": True,
         "no_warnings": True,
         "noprogress": True,
@@ -428,7 +458,7 @@ def enrich_candidates(candidates: List[VideoCandidate], limit: int) -> List[Vide
         "socket_timeout": 8,
         "retries": 1,
         "extractor_retries": 1,
-    }
+    })
     out: List[VideoCandidate] = []
     deadline = time.monotonic() + 90.0
     with yt_dlp.YoutubeDL(opts) as ydl:
@@ -627,7 +657,7 @@ def locate_subtitle(info: dict, job_dir: Path, preferred_lang: str) -> Optional[
 
 def download_source_video(candidate: VideoCandidate, job_dir: Path, language: str) -> tuple[Path, Optional[Path], dict]:
     ffmpeg_bin = imageio_ffmpeg.get_ffmpeg_exe()
-    ydl_opts = {
+    ydl_opts = _apply_yt_auth_opts({
         "format": "bv*[height<=1080]+ba/b[height<=1080]/b",
         "outtmpl": str(job_dir / "%(id)s.%(ext)s"),
         "noplaylist": True,
@@ -641,15 +671,22 @@ def download_source_video(candidate: VideoCandidate, job_dir: Path, language: st
         "no_warnings": True,
         "noprogress": True,
         "ffmpeg_location": ffmpeg_bin,
-    }
+    })
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(candidate.url, download=True)
     except Exception as exc:
+        exc_text = str(exc)
+        if "Sign in to confirm you" in exc_text or "not a bot" in exc_text:
+            hint = (
+                "YouTube bloquea la descarga desde este servidor. "
+                "Configura YTDLP_COOKIES_FILE apuntando a un cookies.txt valido."
+            )
+            raise RuntimeError(f"{exc_text}\n{hint}") from exc
         # Common failure: subtitle/caption endpoints return 429.
         # Retry downloading only media so pipeline can still continue.
-        if "subtitle" not in str(exc).lower() and "caption" not in str(exc).lower():
+        if "subtitle" not in exc_text.lower() and "caption" not in exc_text.lower():
             raise
         log("Fallo descargando subtitulos; reintentando sin subtitulos...")
         retry_opts = dict(ydl_opts)

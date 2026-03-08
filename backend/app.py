@@ -48,6 +48,7 @@ def _read_origins() -> list[str]:
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", str(REPO_ROOT / "output"))).resolve()
 WORK_DIR = Path(os.getenv("WORK_DIR", str(REPO_ROOT / "work"))).resolve()
 BACKEND_PUBLIC_URL = os.getenv("BACKEND_PUBLIC_URL", "").rstrip("/")
+YTDLP_COOKIES_FILE = os.getenv("YTDLP_COOKIES_FILE", "").strip()
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 WORK_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -194,10 +195,16 @@ def _run_job(job_id: str, req: CreateJobRequest) -> None:
         _set_job_state(job_id, status="completed", result=payload)
         _append_log(job_id, "Generacion completada.")
     except Exception as exc:
+        err_text = f"{type(exc).__name__}: {exc}"
+        if ("Sign in to confirm you" in str(exc) or "not a bot" in str(exc)) and not YTDLP_COOKIES_FILE:
+            err_text += (
+                " | AYUDA: en Railway define YTDLP_COOKIES_FILE=/data/cookies.txt "
+                "y sube un cookies.txt valido de YouTube."
+            )
         _set_job_state(
             job_id,
             status="failed",
-            error=f"{type(exc).__name__}: {exc}",
+            error=err_text,
             traceback=traceback.format_exc(limit=4),
         )
         _append_log(job_id, f"Error: {exc}")
@@ -211,6 +218,8 @@ def health() -> dict[str, Any]:
         "time": _utc_now_iso(),
         "output_dir": str(OUTPUT_DIR),
         "work_dir": str(WORK_DIR),
+        "cookies_configured": bool(YTDLP_COOKIES_FILE),
+        "cookies_file_exists": bool(Path(YTDLP_COOKIES_FILE).exists()) if YTDLP_COOKIES_FILE else False,
     }
 
 

@@ -224,6 +224,7 @@ Desde este mismo repo:
   - `BACKEND_PUBLIC_URL=https://TU_BACKEND.up.railway.app`
   - `OUTPUT_DIR=/data/output` (opcional)
   - `WORK_DIR=/data/work` (opcional)
+  - `YTDLP_COOKIES_FILE=/data/cookies.txt` (recomendado para evitar bloqueos "not a bot" de YouTube)
 
 Endpoints backend:
 
@@ -232,6 +233,14 @@ Endpoints backend:
 - `POST /api/jobs`
 - `GET /api/jobs/{job_id}`
 - `GET /output/...` (clips generados)
+
+Nota YouTube anti-bot:
+
+- Si el job falla con `Sign in to confirm you're not a bot`, el backend necesita cookies de YouTube.
+- Exporta `cookies.txt` (formato Netscape) desde tu navegador y súbelo al servidor en `/data/cookies.txt`.
+- Verifica en `GET /api/health`:
+  - `"cookies_configured": true`
+  - `"cookies_file_exists": true`
 
 ### 2) Deploy frontend en Vercel
 
