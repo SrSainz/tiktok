@@ -49,8 +49,33 @@ OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", str(REPO_ROOT / "output"))).resolve()
 WORK_DIR = Path(os.getenv("WORK_DIR", str(REPO_ROOT / "work"))).resolve()
 BACKEND_PUBLIC_URL = os.getenv("BACKEND_PUBLIC_URL", "").rstrip("/")
 YTDLP_COOKIES_FILE = os.getenv("YTDLP_COOKIES_FILE", "").strip()
+YTDLP_COOKIES_TEXT = os.getenv("YTDLP_COOKIES_TEXT", "")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 WORK_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _resolve_cookies_file() -> str:
+    """Resolve cookie file path from file var or inline text var."""
+    global YTDLP_COOKIES_FILE
+    file_path = YTDLP_COOKIES_FILE.strip()
+    if file_path and Path(file_path).exists():
+        return file_path
+
+    if YTDLP_COOKIES_TEXT.strip():
+        inline_path = Path("/tmp/ytdlp_cookies_from_env.txt")
+        text = YTDLP_COOKIES_TEXT
+        # Support both real newlines and escaped "\\n".
+        if "\\n" in text and "\n" not in text:
+            text = text.replace("\\n", "\n")
+        inline_path.write_text(text, encoding="utf-8")
+        YTDLP_COOKIES_FILE = str(inline_path)
+        os.environ["YTDLP_COOKIES_FILE"] = YTDLP_COOKIES_FILE
+        return YTDLP_COOKIES_FILE
+
+    return file_path
+
+
+YTDLP_COOKIES_FILE = _resolve_cookies_file()
 
 
 class DiscoverRequest(BaseModel):
@@ -220,6 +245,7 @@ def health() -> dict[str, Any]:
         "work_dir": str(WORK_DIR),
         "cookies_configured": bool(YTDLP_COOKIES_FILE),
         "cookies_file_exists": bool(Path(YTDLP_COOKIES_FILE).exists()) if YTDLP_COOKIES_FILE else False,
+        "cookies_inline_configured": bool(YTDLP_COOKIES_TEXT.strip()),
     }
 
 

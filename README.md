@@ -225,6 +225,7 @@ Desde este mismo repo:
   - `OUTPUT_DIR=/data/output` (opcional)
   - `WORK_DIR=/data/work` (opcional)
   - `YTDLP_COOKIES_FILE=/data/cookies.txt` (recomendado para evitar bloqueos "not a bot" de YouTube)
+  - `YTDLP_COOKIES_TEXT=<contenido completo de cookies.txt>` (alternativa sin subir archivo)
 
 Endpoints backend:
 
@@ -238,6 +239,7 @@ Nota YouTube anti-bot:
 
 - Si el job falla con `Sign in to confirm you're not a bot`, el backend necesita cookies de YouTube.
 - Exporta `cookies.txt` (formato Netscape) desde tu navegador y súbelo al servidor en `/data/cookies.txt`.
+- Si no puedes subir archivos al volumen, pega ese contenido en `YTDLP_COOKIES_TEXT`.
 - Verifica en `GET /api/health`:
   - `"cookies_configured": true`
   - `"cookies_file_exists": true`
