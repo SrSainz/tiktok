@@ -307,6 +307,7 @@
         pollTimer: null,
         pollFailures: 0,
         pollInFlight: false,
+        pollFailureLimit: 120,
         candidates: [],
         selectedCandidateIdx: -1
       };
@@ -332,6 +333,16 @@
 
       function normalizeBackend(url) {
         return (url || "").trim().replace(/\/+$/, "");
+      }
+
+      function readNumberInput(id, fallback) {
+        const raw = String($(id).value ?? "").trim();
+        if (!raw) {
+          return fallback;
+        }
+        const normalized = raw.replace(",", ".");
+        const value = Number(normalized);
+        return Number.isFinite(value) ? value : fallback;
       }
 
       function saveBackendUrl() {
@@ -383,8 +394,8 @@
         try {
           setStatus(ui.discoverStatus, "Buscando videos...", false);
           const payload = {
-            per_channel_scan: Number($("scanInput").value || 12),
-            max_results: Number($("limitInput").value || 12),
+            per_channel_scan: readNumberInput("scanInput", 12),
+            max_results: readNumberInput("limitInput", 12),
             this_week_only: Boolean($("weekOnly").checked)
           };
           const data = await api("/api/discover", payload, 120000);
@@ -465,11 +476,19 @@
           }
         } catch (err) {
           state.pollFailures += 1;
-          if (state.pollFailures >= 8) {
+          if (state.pollFailures >= state.pollFailureLimit) {
             clearPolling();
-            setStatus(ui.jobStatus, `Error polling persistente: ${err.message}`, true);
+            setStatus(
+              ui.jobStatus,
+              `Error polling persistente (${state.pollFailures}/${state.pollFailureLimit}): ${err.message}`,
+              true
+            );
           } else {
-            setStatus(ui.jobStatus, `Corte temporal (${state.pollFailures}/8), reintentando...`, false);
+            setStatus(
+              ui.jobStatus,
+              `Corte temporal (${state.pollFailures}/${state.pollFailureLimit}), reintentando...`,
+              false
+            );
           }
         } finally {
           state.pollInFlight = false;
@@ -488,10 +507,10 @@
           ui.resultMeta.textContent = "Procesando...";
           const payload = {
             url,
-            duration: Number($("durationInput").value || 60),
-            options: Number($("optionsInput").value || 6),
-            stride: Number($("strideInput").value || 10),
-            overlap_ratio: Number($("overlapInput").value || 0.4)
+            duration: readNumberInput("durationInput", 60),
+            options: readNumberInput("optionsInput", 6),
+            stride: readNumberInput("strideInput", 10),
+            overlap_ratio: readNumberInput("overlapInput", 0.4)
           };
           const data = await api("/api/jobs", payload);
           state.jobId = data.job_id;
@@ -499,7 +518,7 @@
           state.pollFailures = 0;
           setStatus(ui.jobStatus, `Job creado: ${state.jobId}`, false);
           clearPolling();
-          state.pollTimer = setInterval(pollJob, 2500);
+          state.pollTimer = setInterval(pollJob, 3000);
           await pollJob();
         } catch (err) {
           setStatus(ui.jobStatus, `Error creando job: ${err.message}`, true);
