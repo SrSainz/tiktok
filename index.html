@@ -306,6 +306,7 @@
         logCursor: 0,
         pollTimer: null,
         pollFailures: 0,
+        pollInFlight: false,
         candidates: [],
         selectedCandidateIdx: -1
       };
@@ -339,12 +340,12 @@
         setStatus(ui.healthStatus, state.backend ? `Backend guardado: ${state.backend}` : "Backend vacio", !state.backend);
       }
 
-      async function api(path, payload) {
+      async function api(path, payload, timeoutMs = 20000) {
         if (!state.backend) {
           throw new Error("Configura primero la URL del backend.");
         }
         const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 20000);
+        const timeout = setTimeout(() => controller.abort(), timeoutMs);
         const res = await fetch(`${state.backend}${path}`, {
           method: payload ? "POST" : "GET",
           headers: payload ? { "Content-Type": "application/json" } : undefined,
@@ -386,7 +387,7 @@
             max_results: Number($("limitInput").value || 12),
             this_week_only: Boolean($("weekOnly").checked)
           };
-          const data = await api("/api/discover", payload);
+          const data = await api("/api/discover", payload, 120000);
           state.candidates = data.items || [];
           state.selectedCandidateIdx = state.candidates.length ? 0 : -1;
           if (state.candidates.length) {
@@ -446,8 +447,12 @@
         if (!state.jobId) {
           return;
         }
+        if (state.pollInFlight) {
+          return;
+        }
+        state.pollInFlight = true;
         try {
-          const data = await api(`/api/jobs/${state.jobId}?since_log=${state.logCursor}`);
+          const data = await api(`/api/jobs/${state.jobId}?since_log=${state.logCursor}`, undefined, 30000);
           state.pollFailures = 0;
           state.logCursor = Number(data.next_log_cursor || state.logCursor);
           appendLogs(data.logs || []);
@@ -466,6 +471,8 @@
           } else {
             setStatus(ui.jobStatus, `Corte temporal (${state.pollFailures}/8), reintentando...`, false);
           }
+        } finally {
+          state.pollInFlight = false;
         }
       }
 

@@ -120,7 +120,8 @@ def _serialize_candidate(c: Any) -> dict[str, Any]:
 def _serialize_result(result: Any) -> dict[str, Any]:
     options: list[dict[str, Any]] = []
     for opt in result.options:
-        preview_url = _file_to_url(opt.preview_file)
+        preview_path = str((Path(opt.manual_upload_file).resolve().parent / opt.preview_file).resolve())
+        preview_url = _file_to_url(preview_path)
         manual_url = _file_to_url(opt.manual_upload_file)
         options.append(
             {
@@ -269,4 +270,3 @@ def get_job(job_id: str, since_log: int = Query(default=0, ge=0)) -> dict[str, A
             "result": job["result"],
             "error": job["error"],
         }
-
