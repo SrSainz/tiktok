@@ -342,6 +342,7 @@ def analyze_scene_changes(ffmpeg_bin: str, source_video: Path, max_seconds: int 
         [
             "-hide_banner",
             "-nostats",
+            "-nostdin",
             "-i",
             str(source_video),
             "-t",
@@ -393,6 +394,7 @@ def analyze_audio_energy(ffmpeg_bin: str, source_video: Path, max_seconds: int =
         [
             "-hide_banner",
             "-nostats",
+            "-nostdin",
             "-i",
             str(source_video),
             "-t",
