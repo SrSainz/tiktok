@@ -307,7 +307,7 @@
         pollTimer: null,
         pollFailures: 0,
         pollInFlight: false,
-        pollFailureLimit: 120,
+        pollFailureLimit: 600,
         candidates: [],
         selectedCandidateIdx: -1
       };
@@ -469,7 +469,7 @@
               <div class="why">${opt.why_it_may_work || ""}</div>
               <div class="links">
                 ${previewUrl ? `<a href="${previewUrl}" target="_blank" rel="noreferrer">Preview</a>` : ""}
-                ${manualUrl ? `<a class="secondary" href="${manualUrl}" target="_blank" rel="noreferrer">Descargar</a>` : ""}
+                ${manualUrl ? `<a class="secondary" href="${manualUrl}" download rel="noreferrer">Descargar</a>` : ""}
               </div>
             </div>
           `;

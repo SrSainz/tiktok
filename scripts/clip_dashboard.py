@@ -995,8 +995,9 @@ def generate_dashboard(config: DashboardConfig, log_fn: Callable[[str], None] = 
         raise RuntimeError("No se pudo detectar duracion del video.")
 
     # Signal analysis for stronger clip ranking.
-    log_fn("Analizando dinamica de audio y ritmo visual...")
-    analysis_seconds = int(min(max(90.0, source_duration), 300.0))
+    analysis_cap = max(60, min(300, int(os.getenv("CLIP_ANALYSIS_MAX_SECONDS", "150"))))
+    analysis_seconds = int(min(max(60.0, source_duration), float(analysis_cap)))
+    log_fn(f"Analizando dinamica de audio y ritmo visual (primeros {analysis_seconds}s)...")
     try:
         rms_by_second = analyze_audio_energy(ffmpeg_bin, source_video, max_seconds=analysis_seconds)
     except Exception:

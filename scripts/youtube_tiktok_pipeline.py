@@ -814,8 +814,8 @@ def render_short(
     include_hook_overlay: bool = False,
 ) -> None:
     filters = [
-        "scale=1080:1920:force_original_aspect_ratio=increase",
-        "crop=1080:1920",
+        "scale=720:1280:force_original_aspect_ratio=increase",
+        "crop=720:1280",
         "eq=contrast=1.06:saturation=1.14",
     ]
     if include_hook_overlay and hook_text.strip():
@@ -853,17 +853,21 @@ def render_short(
         "-c:v",
         "libx264",
         "-preset",
-        "veryfast",
+        "superfast",
         "-crf",
-        "21",
+        "23",
+        "-maxrate",
+        "3000k",
+        "-bufsize",
+        "6000k",
         "-pix_fmt",
         "yuv420p",
         "-c:a",
         "aac",
         "-ar",
-        "48000",
+        "44100",
         "-b:a",
-        "128k",
+        "96k",
         "-movflags",
         "+faststart",
         str(output_video.name),
@@ -875,8 +879,8 @@ def render_short(
 
     # Fallback for constrained hosts (Railway-like): lower resolution + lighter encode.
     fallback_filters = [
-        "scale=720:1280:force_original_aspect_ratio=increase",
-        "crop=720:1280",
+        "scale=540:960:force_original_aspect_ratio=increase",
+        "crop=540:960",
     ]
     fallback_cmd = [
         ffmpeg_bin,
@@ -903,7 +907,11 @@ def render_short(
         "-preset",
         "ultrafast",
         "-crf",
-        "24",
+        "26",
+        "-maxrate",
+        "1800k",
+        "-bufsize",
+        "3600k",
         "-pix_fmt",
         "yuv420p",
         "-c:a",
@@ -911,7 +919,7 @@ def render_short(
         "-ar",
         "44100",
         "-b:a",
-        "96k",
+        "80k",
         "-movflags",
         "+faststart",
         str(output_video.name),
