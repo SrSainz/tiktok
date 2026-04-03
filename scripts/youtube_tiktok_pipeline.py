@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Iterable, List, Optional
 
 import imageio_ffmpeg
+import requests
 import webvtt
 import yt_dlp
 
@@ -43,6 +44,8 @@ DEFAULT_ES_CHANNELS = [
     "https://www.youtube.com/@AuronPlay/videos",
     "https://www.youtube.com/@Mikecrack/videos",
 ]
+
+DEFAULT_ES_TREND_CATEGORY_IDS = ["20", "24"]
 
 IMPACT_WORDS = {
     "increible",
@@ -186,6 +189,31 @@ def parse_upload_date_ymd(upload_date: Optional[str]) -> Optional[date]:
 def ymd_to_iso(upload_date: Optional[str]) -> str:
     d = parse_upload_date_ymd(upload_date)
     return d.isoformat() if d else "N/A"
+
+
+def _parse_iso8601_duration_seconds(value: str | None) -> Optional[int]:
+    if not value:
+        return None
+    match = re.fullmatch(
+        r"P(?:(?P<days>\d+)D)?T?(?:(?P<hours>\d+)H)?(?:(?P<minutes>\d+)M)?(?:(?P<seconds>\d+)S)?",
+        value,
+    )
+    if not match:
+        return None
+    days = int(match.group("days") or 0)
+    hours = int(match.group("hours") or 0)
+    minutes = int(match.group("minutes") or 0)
+    seconds = int(match.group("seconds") or 0)
+    return days * 86400 + hours * 3600 + minutes * 60 + seconds
+
+
+def _published_at_to_ymd(value: str | None) -> Optional[str]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).strftime("%Y%m%d")
+    except Exception:
+        return None
 
 
 def compute_views_per_day(view_count: int, upload_date: Optional[str], today: date) -> float:
@@ -490,6 +518,62 @@ def enrich_candidates(candidates: List[VideoCandidate], limit: int) -> List[Vide
         out.extend(candidates[limit:])
 
     return out
+
+
+def discover_most_popular_es(
+    api_key: str,
+    max_results: int,
+    category_ids: List[str] | None = None,
+    region_code: str = "ES",
+) -> List[VideoCandidate]:
+    category_ids = [str(x).strip() for x in (category_ids or DEFAULT_ES_TREND_CATEGORY_IDS) if str(x).strip()]
+    if not category_ids:
+        category_ids = list(DEFAULT_ES_TREND_CATEGORY_IDS)
+
+    session = requests.Session()
+    session.headers.update(_yt_http_headers())
+    collected: List[VideoCandidate] = []
+    seen_ids: set[str] = set()
+    per_category = max(10, min(50, max_results))
+
+    for category_id in category_ids:
+        params = {
+            "part": "snippet,contentDetails,statistics",
+            "chart": "mostPopular",
+            "regionCode": region_code,
+            "videoCategoryId": category_id,
+            "maxResults": per_category,
+            "key": api_key,
+        }
+        resp = session.get(
+            "https://www.googleapis.com/youtube/v3/videos",
+            params=params,
+            timeout=20,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+        for item in payload.get("items") or []:
+            video_id = item.get("id") or ""
+            if not video_id or video_id in seen_ids:
+                continue
+            seen_ids.add(video_id)
+            snippet = item.get("snippet") or {}
+            stats = item.get("statistics") or {}
+            content = item.get("contentDetails") or {}
+            collected.append(
+                VideoCandidate(
+                    title=snippet.get("title") or "(sin titulo)",
+                    url=f"https://www.youtube.com/watch?v={video_id}",
+                    view_count=int(stats.get("viewCount") or 0),
+                    duration=_parse_iso8601_duration_seconds(content.get("duration")),
+                    channel=snippet.get("channelTitle") or "",
+                    video_id=video_id,
+                    upload_date=_published_at_to_ymd(snippet.get("publishedAt")),
+                )
+            )
+
+    collected.sort(key=lambda c: (c.view_count, c.duration or 0), reverse=True)
+    return collected[: max(1, max_results)]
 
 
 def discover_from_search(query: str, search_limit: int) -> List[VideoCandidate]:

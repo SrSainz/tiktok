@@ -13,6 +13,7 @@ import argparse
 import html
 import json
 import math
+import os
 import re
 import subprocess
 import sys
@@ -26,6 +27,7 @@ from youtube_tiktok_pipeline import (
     SegmentChoice,
     VideoCandidate,
     compute_views_per_day,
+    discover_most_popular_es,
     download_source_video,
     enrich_candidates,
     is_within_last_days,
@@ -210,8 +212,25 @@ def discover_creator_videos(
             log_fn(message)
 
     channels = channels or list(DEFAULT_CREATOR_CHANNELS)
-    _log(f"Escaneando {len(channels)} canales...")
-    candidates = discover_from_channels(channels, per_channel_scan=per_channel_scan)
+    candidates: List[VideoCandidate] = []
+    yt_api_key = os.getenv("YOUTUBE_API_KEY", "").strip()
+    yt_trend_categories = [x.strip() for x in os.getenv("YOUTUBE_TREND_CATEGORY_IDS", "20,24").split(",") if x.strip()]
+
+    if yt_api_key:
+        try:
+            _log("Consultando charts oficiales de YouTube para ES...")
+            candidates = discover_most_popular_es(
+                api_key=yt_api_key,
+                max_results=max(20, max_results * 3),
+                category_ids=yt_trend_categories,
+                region_code="ES",
+            )
+        except Exception as exc:
+            _log(f"Fallo YouTube Data API, usando fallback por canales: {exc}")
+
+    if not candidates:
+        _log(f"Escaneando {len(channels)} canales...")
+        candidates = discover_from_channels(channels, per_channel_scan=per_channel_scan)
     if not candidates:
         _log("Sin resultados por canales. Probando fallback de busqueda...")
         search_q = "TheGrefg AuronPlay Ibai YoSoyPlex elrubius"

@@ -528,7 +528,8 @@
       async function checkHealth() {
         try {
           const data = await api("/api/health");
-          setStatus(ui.healthStatus, `OK: ${data.service}`, false);
+          const ytMode = data.youtube_api_configured ? "YouTube API ES activa" : "fallback scrape";
+          setStatus(ui.healthStatus, `OK: ${data.service} | ${ytMode}`, false);
         } catch (err) {
           setStatus(ui.healthStatus, `Error backend: ${err.message}`, true);
         }

@@ -268,6 +268,7 @@ def health() -> dict[str, Any]:
         "cookies_configured": bool(YTDLP_COOKIES_FILE),
         "cookies_file_exists": _cookie_file_is_usable(YTDLP_COOKIES_FILE),
         "cookies_inline_configured": bool(YTDLP_COOKIES_TEXT.strip()),
+        "youtube_api_configured": bool(os.getenv("YOUTUBE_API_KEY", "").strip()),
     }
 
 

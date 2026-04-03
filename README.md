@@ -191,6 +191,9 @@ En la GUI ya no necesitas pegar URL todo el rato:
 3. Pulsa `Generar Opciones` para crear los cortes.
 4. Al terminar, se abre `dashboard.html` automaticamente (puedes desmarcarlo en la GUI).
 
+Si defines `YOUTUBE_API_KEY`, la deteccion usa primero la YouTube Data API oficial con `regionCode=ES`
+y categorias de tendencia (`20,24` por defecto) y solo cae a scrape/fallback si falla.
+
 Flujo automatico estilo Opus:
 
 1. Pulsa `Auto IA (buscar + generar)`.
@@ -224,6 +227,8 @@ Desde este mismo repo:
   - `BACKEND_PUBLIC_URL=https://TU_BACKEND.up.railway.app`
   - `OUTPUT_DIR=/data/output` (opcional)
   - `WORK_DIR=/data/work` (opcional)
+  - `YOUTUBE_API_KEY=...` (recomendado para descubrir virales ES con la API oficial)
+  - `YOUTUBE_TREND_CATEGORY_IDS=20,24` (opcional; gaming + entretenimiento por defecto)
   - `YTDLP_COOKIES_FILE=/data/cookies.txt` (recomendado para evitar bloqueos "not a bot" de YouTube)
   - `YTDLP_COOKIES_TEXT=<contenido completo de cookies.txt>` (alternativa sin subir archivo)
 
@@ -243,6 +248,7 @@ Nota YouTube anti-bot:
 - Verifica en `GET /api/health`:
   - `"cookies_configured": true`
   - `"cookies_file_exists": true`
+  - `"youtube_api_configured": true` si quieres usar charts oficiales ES
 
 ### 2) Deploy frontend en Vercel
 
