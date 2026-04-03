@@ -19,6 +19,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -45,9 +46,25 @@ def _read_origins() -> list[str]:
     return [x.strip() for x in raw.split(",") if x.strip()]
 
 
+def _normalize_public_base_url(raw: str) -> str:
+    value = (raw or "").strip().rstrip("/")
+    if not value:
+        return ""
+    if not value.startswith(("http://", "https://")):
+        value = f"https://{value}"
+    parsed = urlparse(value)
+    if not parsed.scheme or not parsed.netloc:
+        return ""
+    return value
+
+
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", str(REPO_ROOT / "output"))).resolve()
 WORK_DIR = Path(os.getenv("WORK_DIR", str(REPO_ROOT / "work"))).resolve()
-BACKEND_PUBLIC_URL = os.getenv("BACKEND_PUBLIC_URL", "").rstrip("/")
+BACKEND_PUBLIC_URL = (
+    _normalize_public_base_url(os.getenv("RAILWAY_PUBLIC_DOMAIN", ""))
+    or _normalize_public_base_url(os.getenv("RAILWAY_SERVICE_WEB_URL", ""))
+    or _normalize_public_base_url(os.getenv("BACKEND_PUBLIC_URL", ""))
+)
 YTDLP_COOKIES_FILE = os.getenv("YTDLP_COOKIES_FILE", "").strip()
 YTDLP_COOKIES_TEXT = os.getenv("YTDLP_COOKIES_TEXT", "")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -265,6 +282,7 @@ def health() -> dict[str, Any]:
         "time": _utc_now_iso(),
         "output_dir": str(OUTPUT_DIR),
         "work_dir": str(WORK_DIR),
+        "public_base_url": BACKEND_PUBLIC_URL,
         "cookies_configured": bool(YTDLP_COOKIES_FILE),
         "cookies_file_exists": _cookie_file_is_usable(YTDLP_COOKIES_FILE),
         "cookies_inline_configured": bool(YTDLP_COOKIES_TEXT.strip()),

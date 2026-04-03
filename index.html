@@ -335,6 +335,27 @@
         return (url || "").trim().replace(/\/+$/, "");
       }
 
+      function resolveAssetUrl(url) {
+        const raw = String(url || "").trim();
+        if (!raw) {
+          return "";
+        }
+        if (/^https?:\/\//i.test(raw)) {
+          return raw;
+        }
+        if (/^[a-z0-9.-]+\.[a-z]{2,}(\/.*)?$/i.test(raw)) {
+          return `https://${raw}`;
+        }
+        if (!state.backend) {
+          return raw;
+        }
+        try {
+          return new URL(raw, `${state.backend}/`).toString();
+        } catch (_) {
+          return raw;
+        }
+      }
+
       function readNumberInput(id, fallback) {
         const raw = String($(id).value ?? "").trim();
         if (!raw) {
@@ -434,7 +455,9 @@
         options.forEach((opt) => {
           const card = document.createElement("article");
           card.className = "clip";
-          const preview = opt.preview_url ? `<video controls preload="metadata" src="${opt.preview_url}"></video>` : "";
+          const previewUrl = resolveAssetUrl(opt.preview_url);
+          const manualUrl = resolveAssetUrl(opt.manual_upload_url);
+          const preview = previewUrl ? `<video controls playsinline preload="metadata" src="${previewUrl}"></video>` : "";
           card.innerHTML = `
             ${preview}
             <div class="body">
@@ -445,8 +468,8 @@
               <div class="desc">${opt.short_description || ""}</div>
               <div class="why">${opt.why_it_may_work || ""}</div>
               <div class="links">
-                ${opt.preview_url ? `<a href="${opt.preview_url}" target="_blank" rel="noreferrer">Preview</a>` : ""}
-                ${opt.manual_upload_url ? `<a class="secondary" href="${opt.manual_upload_url}" target="_blank" rel="noreferrer">Descargar</a>` : ""}
+                ${previewUrl ? `<a href="${previewUrl}" target="_blank" rel="noreferrer">Preview</a>` : ""}
+                ${manualUrl ? `<a class="secondary" href="${manualUrl}" target="_blank" rel="noreferrer">Descargar</a>` : ""}
               </div>
             </div>
           `;
