@@ -277,9 +277,17 @@ def _looks_like_corporate_creator_block(candidate: VideoCandidate) -> bool:
 
 def _clean_social_text(value: str, *, allow_punctuation: bool = True) -> str:
     text = html.unescape(str(value or ""))
+    text = (
+        text.replace("â€¦", "...")
+        .replace("ˇ", " ")
+        .replace("ż", " ")
+        .replace("�", " ")
+    )
     text = re.sub(r"\[[^\]]+\]", " ", text)
     text = re.sub(r"\([^\)]*\)", " ", text)
     text = re.sub(r"https?://\S+", " ", text)
+    if allow_punctuation:
+        text = re.sub(r"[^\w\s¿?¡!.,:;/'%+\-]", " ", text, flags=re.UNICODE)
     text = re.sub(r"\s+", " ", text).strip(" \t\r\n-_|:;,")
     if not allow_punctuation:
         text = re.sub(r"[^\w\s]", " ", text)
@@ -305,6 +313,24 @@ def _dedupe_keep_order(items: List[str]) -> List[str]:
         seen.add(key)
         ordered.append(item.strip())
     return ordered
+
+
+def _looks_noisy_title(text: str) -> bool:
+    raw = str(text or "")
+    clean = _clean_social_text(raw)
+    if not clean:
+        return True
+    if any(marker in raw for marker in ("â€¦", "ˇ", "ż", "�")):
+        return True
+    tokens = clean.split()
+    if tokens and (sum(1 for token in tokens if len(token) == 1) / len(tokens)) > 0.18:
+        return True
+    letters = [char for char in clean if char.isalpha()]
+    if len(clean) > 18 and letters:
+        upper_ratio = sum(1 for char in letters if char.isupper()) / len(letters)
+        if upper_ratio > 0.72:
+            return True
+    return False
 
 
 def _build_topic_hashtags(*texts: str, signal_tags: List[str] | None = None) -> List[str]:
@@ -337,20 +363,23 @@ def build_tiktok_copy(
     transcript_preview: str,
     signal_tags: List[str],
 ) -> tuple[str, str, List[str]]:
+    clean_hook = _truncate_copy(hook, 72)
     lead_candidates = [
-        _truncate_copy(hook, 72),
         _truncate_copy(short_description, 72),
         _truncate_copy(transcript_preview, 72),
         _truncate_copy(source_title, 72),
     ]
+    if clean_hook and not _looks_noisy_title(hook):
+        lead_candidates.insert(0, clean_hook)
     title = next((candidate for candidate in lead_candidates if candidate and len(candidate) >= 12), "")
     if not title:
-        title = _truncate_copy(source_title or "Clip viral de la semana", 72)
+        title = _truncate_copy(clean_hook or source_title or "Clip viral de la semana", 72)
 
     caption = title
     why_line = _truncate_copy(why_it_may_work, 110)
     if why_line and why_line.lower() not in title.lower():
-        caption = f"{caption}. {why_line}"
+        separator = " " if caption.endswith(("...", ".", "!", "?")) else ". "
+        caption = f"{caption}{separator}{why_line}"
     if signal_tags:
         caption = f"{caption} | {' · '.join(signal_tags[:3])}"
     hashtags = _build_topic_hashtags(
