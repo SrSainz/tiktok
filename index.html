@@ -301,7 +301,14 @@
           <div id="healthStatus" class="status">Sin comprobar</div>
 
           <h2 style="margin-top: 14px">Descubrir virales</h2>
-          <div class="status">Charts oficiales de YouTube España, ordenados por visitas.</div>
+          <div class="status">Charts oficiales de YouTube España. Puedes ver virales generales o solo creadores.</div>
+          <div style="margin-top: 10px">
+            <label for="discoverMode">Modo descubrimiento</label>
+            <select id="discoverMode">
+              <option value="viral_es">Virales ES</option>
+              <option value="creators_es" selected>Creadores ES</option>
+            </select>
+          </div>
           <div class="row">
             <div>
               <label for="scanInput">Fallback scan/canal</label>
@@ -559,7 +566,7 @@
         try {
             setStatus(ui.discoverStatus, "Buscando videos...", false);
           const payload = {
-            mode: "viral_es",
+            mode: $("discoverMode").value || "creators_es",
             per_channel_scan: readNumberInput("scanInput", 12),
             max_results: readNumberInput("limitInput", 12),
             this_week_only: Boolean($("weekOnly").checked)

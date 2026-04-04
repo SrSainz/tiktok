@@ -46,9 +46,52 @@ DEFAULT_CREATOR_CHANNELS = [
     "https://www.youtube.com/@Ibai/videos",
     "https://www.youtube.com/@YoSoyPlex/videos",
     "https://www.youtube.com/@elrubiusOMG/videos",
+    "https://www.youtube.com/@Dagar/videos",
+    "https://www.youtube.com/@Lyna/videos",
+    "https://www.youtube.com/@illojuan/videos",
+    "https://www.youtube.com/@JordiWild/videos",
+    "https://www.youtube.com/@byViruZz/videos",
 ]
 
 DISCOVERY_MODES = {"viral_es", "creators_es"}
+
+CREATOR_CHANNEL_BLOCKLIST = {
+    "records",
+    "music",
+    "pictures",
+    "studios",
+    "studio",
+    "films",
+    "film",
+    "trailers",
+    "trailer",
+    "tv",
+    "television",
+    "news",
+    "noticias",
+    "radio",
+    "label",
+    "labels",
+    "vevo",
+    "entertainment",
+    "official",
+}
+
+CREATOR_TITLE_BLOCKLIST = {
+    "official trailer",
+    "trailer oficial",
+    "tráiler oficial",
+    "teaser",
+    "official mv",
+    "video oficial",
+    "official video",
+    "lyric video",
+    "banda sonora",
+    "soundtrack",
+    "episode",
+    "capitulo completo",
+    "full episode",
+}
 
 
 @dataclass
@@ -185,6 +228,41 @@ def _normalize_0_100(value: float, min_v: float, max_v: float) -> float:
     return (value - min_v) * 100.0 / (max_v - min_v)
 
 
+def _norm_text(value: str) -> str:
+    text = (value or "").strip().lower()
+    return re.sub(r"\s+", " ", text)
+
+
+def _looks_like_corporate_creator_block(candidate: VideoCandidate) -> bool:
+    channel = _norm_text(candidate.channel)
+    title = _norm_text(candidate.title)
+    haystack = f"{channel} | {title}"
+    if any(token in haystack for token in CREATOR_TITLE_BLOCKLIST):
+        return True
+    if any(token in channel for token in CREATOR_CHANNEL_BLOCKLIST):
+        return True
+    if re.search(r"\b(mv|ost|bso|trailer|teaser)\b", title):
+        return True
+    return False
+
+
+def _creator_mode_candidates(candidates: List[VideoCandidate], log_fn: Callable[[str], None] | None = None) -> List[VideoCandidate]:
+    def _log(message: str) -> None:
+        if log_fn:
+            log_fn(message)
+
+    filtered: List[VideoCandidate] = []
+    for c in candidates:
+        duration = int(c.duration or 0)
+        if duration < 6 * 60:
+            continue
+        if _looks_like_corporate_creator_block(c):
+            continue
+        filtered.append(c)
+    _log(f"Filtro Creadores ES: {len(filtered)}/{len(candidates)} candidatos tras excluir labels/trailers/canales corporativos.")
+    return filtered
+
+
 def score_candidate_ai(c: VideoCandidate, today: date) -> tuple[float, str]:
     title = (c.title or "").lower()
     tokens = re.findall(r"[a-z0-9]+", title)
@@ -262,9 +340,12 @@ def discover_creator_videos(
     yt_trend_categories = [x.strip() for x in os.getenv("YOUTUBE_TREND_CATEGORY_IDS", "").split(",") if x.strip()]
     used_charts = False
 
-    if yt_api_key and mode == "viral_es":
+    if yt_api_key and mode in {"viral_es", "creators_es"}:
         try:
-            _log("Consultando charts oficiales de YouTube para ES (sin preferencia de creador)...")
+            if mode == "creators_es":
+                _log("Consultando charts oficiales de YouTube para ES y filtrando a videos de creadores...")
+            else:
+                _log("Consultando charts oficiales de YouTube para ES (sin preferencia de creador)...")
             candidates = discover_most_popular_es(
                 api_key=yt_api_key,
                 max_results=max(30, max_results * 4),
@@ -272,7 +353,7 @@ def discover_creator_videos(
                 region_code="ES",
             )
             used_charts = bool(candidates)
-            if len(candidates) < max_results and yt_trend_categories:
+            if yt_trend_categories:
                 _log("Charts generales escasos; completando con categorias adicionales configuradas.")
                 extra_candidates = discover_most_popular_es(
                     api_key=yt_api_key,
@@ -285,12 +366,25 @@ def discover_creator_videos(
                     if c.video_id and c.video_id in extra_by_id:
                         continue
                     candidates.append(c)
+            if mode == "creators_es":
+                candidates = _creator_mode_candidates(candidates, log_fn=_log)
         except Exception as exc:
-            raise RuntimeError(f"YouTube Data API fallo en modo viral_es: {exc}") from exc
+            raise RuntimeError(f"YouTube Data API fallo en modo {mode}: {exc}") from exc
+
+    if mode == "creators_es" and len(candidates) < max_results:
+        _log("Pool oficial de creadores escaso; completando con un pool curado de creadores españoles.")
+        extra_channel_candidates = discover_from_channels(channels, per_channel_scan=max(6, min(per_channel_scan, 12)))
+        seen_ids = {c.video_id for c in candidates if c.video_id}
+        for c in extra_channel_candidates:
+            if c.video_id and c.video_id in seen_ids:
+                continue
+            candidates.append(c)
+            if c.video_id:
+                seen_ids.add(c.video_id)
 
     if not candidates:
-        if mode == "viral_es":
-            _log("Sin charts ES disponibles. Usando fallback por canales; los resultados ya no son charts oficiales.")
+        if mode in {"viral_es", "creators_es"}:
+            _log(f"Sin charts ES disponibles para {mode}. Usando fallback por canales; los resultados ya no son charts oficiales.")
         _log(f"Escaneando {len(channels)} canales...")
         candidates = discover_from_channels(channels, per_channel_scan=per_channel_scan)
     if not candidates:
@@ -364,8 +458,12 @@ def discover_creator_videos(
         filtered.sort(key=lambda x: (x.ai_score, x.views_per_day, x.view_count), reverse=True)
     _log(f"Videos validos tras filtros: {len(filtered)}")
     if used_charts:
-        selected = filtered[:max_results]
-        _log(f"Seleccion final por visitas ES: {len(selected)} videos")
+        if mode == "creators_es":
+            selected = _select_top_with_channel_cap(filtered, max_results=max_results, per_channel_cap=1)
+            _log(f"Seleccion final Creadores ES por visitas: {len(selected)} videos")
+        else:
+            selected = filtered[:max_results]
+            _log(f"Seleccion final por visitas ES: {len(selected)} videos")
     else:
         selected = _select_diverse_by_channel(filtered, max_results=max_results)
         channels_used = len({(c.channel or "").strip().lower() for c in selected if (c.channel or "").strip()})
@@ -414,6 +512,37 @@ def _select_diverse_by_channel(candidates: List[VideoCandidate], max_results: in
                 selected.append(groups[ch].pop(0))
                 progressed = True
         if not progressed:
+            break
+
+    return selected
+
+
+def _select_top_with_channel_cap(
+    candidates: List[VideoCandidate],
+    max_results: int,
+    per_channel_cap: int = 1,
+) -> List[VideoCandidate]:
+    if not candidates or max_results <= 0:
+        return []
+
+    selected: List[VideoCandidate] = []
+    leftovers: List[VideoCandidate] = []
+    counts: dict[str, int] = {}
+
+    for c in candidates:
+        key = _channel_key(c)
+        current = counts.get(key, 0)
+        if current < per_channel_cap:
+            selected.append(c)
+            counts[key] = current + 1
+            if len(selected) >= max_results:
+                return selected
+        else:
+            leftovers.append(c)
+
+    for c in leftovers:
+        selected.append(c)
+        if len(selected) >= max_results:
             break
 
     return selected
