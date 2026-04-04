@@ -70,6 +70,7 @@ def _normalize_public_base_url(raw: str) -> str:
 
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", str(REPO_ROOT / "output"))).resolve()
 WORK_DIR = Path(os.getenv("WORK_DIR", str(REPO_ROOT / "work"))).resolve()
+TIKTOK_VERIFICATION_DIR = Path(os.getenv("TIKTOK_VERIFICATION_DIR", str(REPO_ROOT / "tiktok_verification"))).resolve()
 FRONTEND_INDEX = REPO_ROOT / "index.html"
 BACKEND_PUBLIC_URL = (
     _normalize_public_base_url(os.getenv("RAILWAY_PUBLIC_DOMAIN", ""))
@@ -90,6 +91,7 @@ TIKTOK_DEFAULT_PRIVACY = os.getenv("TIKTOK_DEFAULT_PRIVACY", "SELF_ONLY").strip(
 TIKTOK_EXPECTED_USERNAME = os.getenv("TIKTOK_EXPECTED_USERNAME", "").strip().lstrip("@").lower()
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 WORK_DIR.mkdir(parents=True, exist_ok=True)
+TIKTOK_VERIFICATION_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _cookie_file_is_usable(path: str) -> bool:
@@ -382,7 +384,7 @@ def _request_public_base_url(request: Request) -> str:
 
 
 def _build_tiktok_redirect_uri(request: Request) -> str:
-    return f"{_request_public_base_url(request)}/api/tiktok/connect/callback"
+    return f"{_request_public_base_url(request)}/api/tiktok/connect/callback/"
 
 
 def _telegram_call(method: str, *, data: dict[str, Any], files: dict[str, Any] | None = None, timeout: int = 180) -> dict[str, Any]:
@@ -919,7 +921,21 @@ def tiktok_connect_start(request: Request) -> dict[str, Any]:
     return {"ok": True, "auth_url": auth_url, "redirect_uri": redirect_uri}
 
 
+@app.get("/api/tiktok/connect/callback/{verification_name}")
+def tiktok_connect_callback_verification(verification_name: str) -> FileResponse:
+    safe_name = Path(verification_name).name
+    target = (TIKTOK_VERIFICATION_DIR / safe_name).resolve()
+    try:
+        target.relative_to(TIKTOK_VERIFICATION_DIR)
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail="verification_file_not_found") from exc
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail="verification_file_not_found")
+    return FileResponse(str(target), media_type="text/plain; charset=utf-8")
+
+
 @app.get("/api/tiktok/connect/callback")
+@app.get("/api/tiktok/connect/callback/")
 def tiktok_connect_callback(code: str | None = None, state: str | None = None, error: str | None = None) -> HTMLResponse:
     if error:
         return HTMLResponse(f"<html><body><h2>TikTok autorizacion fallida</h2><p>{error}</p></body></html>", status_code=400)
