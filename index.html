@@ -301,9 +301,10 @@
           <div id="healthStatus" class="status">Sin comprobar</div>
 
           <h2 style="margin-top: 14px">Descubrir virales</h2>
+          <div class="status">Charts oficiales de YouTube España, ordenados por visitas.</div>
           <div class="row">
             <div>
-              <label for="scanInput">Scan/canal</label>
+              <label for="scanInput">Fallback scan/canal</label>
               <input id="scanInput" type="number" min="5" max="50" value="12" />
             </div>
             <div>
@@ -506,7 +507,7 @@
           const vpd = Number(item.views_per_day || 0).toLocaleString("es-ES", { maximumFractionDigits: 0 });
           row.innerHTML = `
             <div class="title">${idx + 1}. ${item.title}</div>
-            <div class="meta">AI ${Number(item.ai_score || 0).toFixed(1)} | ${item.channel || "Canal"} | ${views} views | ${vpd}/dia</div>
+            <div class="meta">${item.channel || "Canal"} | ${views} views | ${vpd}/dia | score clip ${Number(item.ai_score || 0).toFixed(1)}</div>
           `;
           row.onclick = () => {
             state.selectedCandidateIdx = idx;
@@ -519,8 +520,9 @@
 
       async function discover() {
         try {
-          setStatus(ui.discoverStatus, "Buscando videos...", false);
+            setStatus(ui.discoverStatus, "Buscando videos...", false);
           const payload = {
+            mode: "viral_es",
             per_channel_scan: readNumberInput("scanInput", 12),
             max_results: readNumberInput("limitInput", 12),
             this_week_only: Boolean($("weekOnly").checked)

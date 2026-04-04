@@ -48,6 +48,8 @@ DEFAULT_CREATOR_CHANNELS = [
     "https://www.youtube.com/@elrubiusOMG/videos",
 ]
 
+DISCOVERY_MODES = {"viral_es", "creators_es"}
+
 
 @dataclass
 class ClipOption:
@@ -243,26 +245,46 @@ def discover_creator_videos(
     this_week_only: bool = True,
     min_source_duration: int = 90,
     max_results: int = 20,
+    mode: str = "viral_es",
     log_fn: Callable[[str], None] | None = None,
 ) -> List[VideoCandidate]:
     def _log(message: str) -> None:
         if log_fn:
             log_fn(message)
 
+    mode = (mode or "viral_es").strip().lower()
+    if mode not in DISCOVERY_MODES:
+        mode = "viral_es"
+
     channels = channels or list(DEFAULT_CREATOR_CHANNELS)
     candidates: List[VideoCandidate] = []
     yt_api_key = os.getenv("YOUTUBE_API_KEY", "").strip()
-    yt_trend_categories = [x.strip() for x in os.getenv("YOUTUBE_TREND_CATEGORY_IDS", "20,24").split(",") if x.strip()]
+    yt_trend_categories = [x.strip() for x in os.getenv("YOUTUBE_TREND_CATEGORY_IDS", "").split(",") if x.strip()]
+    used_charts = False
 
-    if yt_api_key:
+    if yt_api_key and mode == "viral_es":
         try:
-            _log("Consultando charts oficiales de YouTube para ES...")
+            _log("Consultando charts oficiales de YouTube para ES (sin preferencia de creador)...")
             candidates = discover_most_popular_es(
                 api_key=yt_api_key,
-                max_results=max(20, max_results * 3),
-                category_ids=yt_trend_categories,
+                max_results=max(30, max_results * 4),
+                category_ids=None,
                 region_code="ES",
             )
+            used_charts = bool(candidates)
+            if len(candidates) < max_results and yt_trend_categories:
+                _log("Charts generales escasos; completando con categorias adicionales configuradas.")
+                extra_candidates = discover_most_popular_es(
+                    api_key=yt_api_key,
+                    max_results=max(20, max_results * 2),
+                    category_ids=yt_trend_categories,
+                    region_code="ES",
+                )
+                extra_by_id = {c.video_id: c for c in candidates if c.video_id}
+                for c in extra_candidates:
+                    if c.video_id and c.video_id in extra_by_id:
+                        continue
+                    candidates.append(c)
         except Exception as exc:
             _log(f"Fallo YouTube Data API, usando fallback por canales: {exc}")
 
@@ -289,13 +311,10 @@ def discover_creator_videos(
         filtered.append(c)
 
     if this_week_only and filtered:
-        # If weekly results are dominated by a single creator, widen to 30 days
-        # to recover channel diversity without dropping virality sorting.
         seen_video_ids = {c.video_id for c in filtered if c.video_id}
-        unique_week_channels = {_channel_key(c) for c in filtered}
-        target_diverse_channels = max(2, min(4, max_results))
-        if len(unique_week_channels) < target_diverse_channels:
-            _log("Poca diversidad esta semana; ampliando candidatos a ultimos 30 dias.")
+        need_temporal_backfill = used_charts and len(filtered) < max_results
+        if need_temporal_backfill:
+            _log("Pocos resultados esta semana; ampliando candidatos a ultimos 30 dias.")
             for c in candidates:
                 if (c.duration or 0) < min_source_duration:
                     continue
@@ -337,11 +356,18 @@ def discover_creator_videos(
         for c in filtered:
             c.ai_score = round(_normalize_0_100(c.ai_score, s_min, s_max), 1)
 
-    filtered.sort(key=lambda x: (x.ai_score, x.views_per_day, x.view_count), reverse=True)
+    if used_charts:
+        filtered.sort(key=lambda x: (x.view_count, x.views_per_day, x.ai_score), reverse=True)
+    else:
+        filtered.sort(key=lambda x: (x.ai_score, x.views_per_day, x.view_count), reverse=True)
     _log(f"Videos validos tras filtros: {len(filtered)}")
-    selected = _select_diverse_by_channel(filtered, max_results=max_results)
-    channels_used = len({(c.channel or "").strip().lower() for c in selected if (c.channel or "").strip()})
-    _log(f"Seleccion final: {len(selected)} videos de {max(1, channels_used)} canales")
+    if used_charts:
+        selected = filtered[:max_results]
+        _log(f"Seleccion final por visitas ES: {len(selected)} videos")
+    else:
+        selected = _select_diverse_by_channel(filtered, max_results=max_results)
+        channels_used = len({(c.channel or "").strip().lower() for c in selected if (c.channel or "").strip()})
+        _log(f"Seleccion final: {len(selected)} videos de {max(1, channels_used)} canales")
     return selected
 
 

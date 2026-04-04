@@ -124,6 +124,7 @@ YTDLP_COOKIES_FILE = _resolve_cookies_file()
 
 
 class DiscoverRequest(BaseModel):
+    mode: str = Field(default="viral_es", min_length=4, max_length=32)
     channels: list[str] | None = None
     per_channel_scan: int = Field(default=12, ge=5, le=50)
     this_week_only: bool = True
@@ -415,6 +416,7 @@ def studio() -> FileResponse:
 def discover(req: DiscoverRequest) -> dict[str, Any]:
     try:
         candidates = discover_creator_videos(
+            mode=req.mode,
             channels=req.channels,
             per_channel_scan=req.per_channel_scan,
             this_week_only=req.this_week_only,

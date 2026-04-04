@@ -45,8 +45,6 @@ DEFAULT_ES_CHANNELS = [
     "https://www.youtube.com/@Mikecrack/videos",
 ]
 
-DEFAULT_ES_TREND_CATEGORY_IDS = ["20", "24"]
-
 IMPACT_WORDS = {
     "increible",
     "secreto",
@@ -526,25 +524,27 @@ def discover_most_popular_es(
     category_ids: List[str] | None = None,
     region_code: str = "ES",
 ) -> List[VideoCandidate]:
-    category_ids = [str(x).strip() for x in (category_ids or DEFAULT_ES_TREND_CATEGORY_IDS) if str(x).strip()]
-    if not category_ids:
-        category_ids = list(DEFAULT_ES_TREND_CATEGORY_IDS)
+    raw_category_ids = [str(x).strip() for x in (category_ids or []) if str(x).strip()]
+    if any(x.lower() in {"all", "*", "any"} for x in raw_category_ids):
+        raw_category_ids = []
 
     session = requests.Session()
     session.headers.update(_yt_http_headers())
     collected: List[VideoCandidate] = []
     seen_ids: set[str] = set()
-    per_category = max(10, min(50, max_results))
+    per_request = max(10, min(50, max_results))
+    request_categories = raw_category_ids or [None]
 
-    for category_id in category_ids:
+    for category_id in request_categories:
         params = {
             "part": "snippet,contentDetails,statistics",
             "chart": "mostPopular",
             "regionCode": region_code,
-            "videoCategoryId": category_id,
-            "maxResults": per_category,
+            "maxResults": per_request,
             "key": api_key,
         }
+        if category_id:
+            params["videoCategoryId"] = category_id
         resp = session.get(
             "https://www.googleapis.com/youtube/v3/videos",
             params=params,
