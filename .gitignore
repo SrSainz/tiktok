@@ -13,6 +13,7 @@ env/
 # Local env / secrets
 .env
 .env.*
+!.env.example
 .tiktok_tokens.json
 cookies*.txt
 *.pem
