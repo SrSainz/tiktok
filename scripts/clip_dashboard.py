@@ -300,7 +300,8 @@ def _truncate_copy(text: str, limit: int) -> str:
     if len(clean) <= limit:
         return clean
     cut = clean[: limit - 1].rsplit(" ", 1)[0].strip()
-    return (cut or clean[: limit - 1].strip()) + "..."
+    base = (cut or clean[: limit - 1].strip()).rstrip(". ")
+    return base + "..."
 
 
 def _dedupe_keep_order(items: List[str]) -> List[str]:
