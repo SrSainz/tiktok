@@ -663,22 +663,30 @@
               </div>
               <div class="links">
                 ${previewUrl ? `<a href="${escapeHtml(previewUrl)}" target="_blank" rel="noreferrer">Preview</a>` : ""}
-                ${manualUrl ? `<button type="button" class="secondary js-send-telegram">Descargar + Telegram</button>` : ""}
+                ${manualUrl ? `<button type="button" class="secondary js-download">Descargar</button>` : ""}
+                ${manualUrl ? `<button type="button" class="secondary js-send-telegram">Telegram</button>` : ""}
               </div>
             </div>
           `;
           if (manualUrl) {
+            const downloadBtn = card.querySelector(".js-download");
             const sendBtn = card.querySelector(".js-send-telegram");
+            if (downloadBtn) {
+              downloadBtn.addEventListener("click", () => {
+                triggerDownload(manualUrl, opt.preview_file || `option_${opt.option_id}.mp4`);
+                setStatus(ui.jobStatus, `Opcion ${opt.option_id} descargada.`, false);
+              });
+            }
             if (sendBtn) {
               sendBtn.addEventListener("click", async () => {
                 sendBtn.disabled = true;
-                triggerDownload(manualUrl, opt.preview_file || `option_${opt.option_id}.mp4`);
                 setStatus(ui.jobStatus, `Enviando opcion ${opt.option_id} a Telegram...`, false);
                 try {
-                  await sendOptionToTelegram(opt.option_id);
-                  setStatus(ui.jobStatus, `Opcion ${opt.option_id} descargada y enviada a Telegram.`, false);
+                  const sent = await sendOptionToTelegram(opt.option_id);
+                  const method = sent?.method ? ` (${sent.method})` : "";
+                  setStatus(ui.jobStatus, `Opcion ${opt.option_id} enviada a Telegram${method}.`, false);
                 } catch (err) {
-                  setStatus(ui.jobStatus, `La descarga salio, pero Telegram fallo: ${err.message}`, true);
+                  setStatus(ui.jobStatus, `Telegram fallo en la opcion ${opt.option_id}: ${err.message}`, true);
                 } finally {
                   sendBtn.disabled = false;
                 }

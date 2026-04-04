@@ -829,19 +829,19 @@ def render_short(
     include_hook_overlay: bool = False,
 ) -> None:
     base_comp = (
-        "[0:v]scale=720:1280:force_original_aspect_ratio=increase,"
-        "crop=720:1280,boxblur=18:10[bg];"
-        "[0:v]scale=720:1280:force_original_aspect_ratio=decrease,"
-        "eq=contrast=1.06:saturation=1.14[fg];"
+        "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,"
+        "crop=1080:1920,boxblur=22:12[bg];"
+        "[0:v]scale=1080:1920:force_original_aspect_ratio=decrease,"
+        "setsar=1,eq=contrast=1.05:saturation=1.10[fg];"
         "[bg][fg]overlay=(W-w)/2:(H-h)/2[v0]"
     )
     final_chain = "[v0]"
     if include_hook_overlay and hook_text.strip():
         final_chain = (
-            "[v0]drawbox=x=40:y=100:w=640:h=150:color=black@0.32:t=fill,"
+            "[v0]drawbox=x=60:y=120:w=960:h=170:color=black@0.28:t=fill,"
             "drawtext="
             f"font=Arial:text='{escape_drawtext(hook_text)}':"
-            "x=(w-text_w)/2:y=138:fontsize=38:fontcolor=white:borderw=2:bordercolor=black[vout]"
+            "x=(w-text_w)/2:y=165:fontsize=52:fontcolor=white:borderw=2:bordercolor=black[vout]"
         )
         output_map = "[vout]"
     else:
@@ -873,22 +873,26 @@ def render_short(
         "2",
         "-c:v",
         "libx264",
+        "-profile:v",
+        "high",
+        "-level:v",
+        "4.1",
         "-preset",
         "superfast",
         "-crf",
         "23",
         "-maxrate",
-        "3000k",
+        "4000k",
         "-bufsize",
-        "6000k",
+        "8000k",
         "-pix_fmt",
         "yuv420p",
         "-c:a",
         "aac",
         "-ar",
-        "44100",
+        "48000",
         "-b:a",
-        "96k",
+        "128k",
         "-movflags",
         "+faststart",
         str(output_video.name),
@@ -900,9 +904,9 @@ def render_short(
 
     # Fallback for constrained hosts (Railway-like): lower resolution + lighter encode.
     fallback_comp = (
-        "[0:v]scale=540:960:force_original_aspect_ratio=increase,"
-        "crop=540:960,boxblur=14:8[bg];"
-        "[0:v]scale=540:960:force_original_aspect_ratio=decrease[fg];"
+        "[0:v]scale=720:1280:force_original_aspect_ratio=increase,"
+        "crop=720:1280,boxblur=18:10[bg];"
+        "[0:v]scale=720:1280:force_original_aspect_ratio=decrease,setsar=1[fg];"
         "[bg][fg]overlay=(W-w)/2:(H-h)/2[v]"
     )
     fallback_cmd = [
@@ -931,22 +935,24 @@ def render_short(
         "1",
         "-c:v",
         "libx264",
+        "-profile:v",
+        "high",
         "-preset",
         "ultrafast",
         "-crf",
-        "26",
+        "24",
         "-maxrate",
-        "1800k",
+        "2200k",
         "-bufsize",
-        "3600k",
+        "4400k",
         "-pix_fmt",
         "yuv420p",
         "-c:a",
         "aac",
         "-ar",
-        "44100",
+        "48000",
         "-b:a",
-        "80k",
+        "128k",
         "-movflags",
         "+faststart",
         str(output_video.name),

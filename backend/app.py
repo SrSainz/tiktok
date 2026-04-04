@@ -22,7 +22,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 import requests
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -278,7 +278,37 @@ def _build_telegram_caption(job: dict[str, Any], option: dict[str, Any], result:
     return "\n".join(lines)[:1000]
 
 
-def _send_option_to_telegram(job: dict[str, Any], option: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+def _build_absolute_asset_url(request: Request, relative_or_absolute_url: str) -> str:
+    raw = str(relative_or_absolute_url or "").strip()
+    if not raw:
+        return ""
+    if raw.startswith(("http://", "https://")):
+        return raw
+    base = str(request.base_url).rstrip("/")
+    if raw.startswith("/"):
+        return f"{base}{raw}"
+    return f"{base}/{raw}"
+
+
+def _telegram_call(method: str, *, data: dict[str, Any], files: dict[str, Any] | None = None, timeout: int = 180) -> dict[str, Any]:
+    try:
+        response = _telegram_session.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}",
+            data=data,
+            files=files,
+            timeout=timeout,
+        )
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"telegram_send_failed: {exc}") from exc
+
+    body = response.json()
+    if not body.get("ok"):
+        raise HTTPException(status_code=502, detail=f"telegram_send_failed: {body}")
+    return body
+
+
+def _send_option_to_telegram(job: dict[str, Any], option: dict[str, Any], result: dict[str, Any], request: Request) -> dict[str, Any]:
     if not _telegram_enabled():
         raise HTTPException(status_code=503, detail="telegram_not_configured")
 
@@ -294,31 +324,54 @@ def _send_option_to_telegram(job: dict[str, Any], option: dict[str, Any], result
     }
     if TELEGRAM_MESSAGE_THREAD_ID:
         data["message_thread_id"] = TELEGRAM_MESSAGE_THREAD_ID
+    errors: list[str] = []
+    public_url = _build_absolute_asset_url(request, str(option.get("manual_upload_url") or ""))
+
+    if public_url:
+        try:
+            body = _telegram_call("sendVideo", data={**data, "video": public_url}, timeout=120)
+            result_obj = body.get("result") or {}
+            return {
+                "ok": True,
+                "message_id": result_obj.get("message_id"),
+                "chat_id": TELEGRAM_CHAT_ID,
+                "method": "sendVideo:url",
+            }
+        except HTTPException as exc:
+            errors.append(str(exc.detail))
+
+    try:
+        with video_path.open("rb") as fh:
+            body = _telegram_call(
+                "sendVideo",
+                data=data,
+                files={"video": (video_path.name, fh, "video/mp4")},
+                timeout=240,
+            )
+        result_obj = body.get("result") or {}
+        return {
+            "ok": True,
+            "message_id": result_obj.get("message_id"),
+            "chat_id": TELEGRAM_CHAT_ID,
+            "method": "sendVideo:file",
+        }
+    except HTTPException as exc:
+        errors.append(str(exc.detail))
 
     with video_path.open("rb") as fh:
-        files = {
-            "video": (video_path.name, fh, "video/mp4"),
-        }
-        try:
-            response = _telegram_session.post(
-                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendVideo",
-                data=data,
-                files=files,
-                timeout=180,
-            )
-            response.raise_for_status()
-        except requests.RequestException as exc:
-            raise HTTPException(status_code=502, detail=f"telegram_send_failed: {exc}") from exc
-
-    body = response.json()
-    if not body.get("ok"):
-        raise HTTPException(status_code=502, detail=f"telegram_send_failed: {body}")
-
+        body = _telegram_call(
+            "sendDocument",
+            data=data,
+            files={"document": (video_path.name, fh, "video/mp4")},
+            timeout=240,
+        )
     result_obj = body.get("result") or {}
     return {
         "ok": True,
         "message_id": result_obj.get("message_id"),
         "chat_id": TELEGRAM_CHAT_ID,
+        "method": "sendDocument:file",
+        "fallback_errors": errors,
     }
 
 
@@ -472,7 +525,7 @@ def get_job(job_id: str, since_log: int = Query(default=0, ge=0)) -> dict[str, A
 
 
 @app.post("/api/share/telegram")
-def share_option_to_telegram(req: ShareTelegramRequest) -> dict[str, Any]:
+def share_option_to_telegram(req: ShareTelegramRequest, request: Request) -> dict[str, Any]:
     with _jobs_lock:
         job = _jobs.get(req.job_id)
         if not job:
@@ -485,8 +538,8 @@ def share_option_to_telegram(req: ShareTelegramRequest) -> dict[str, Any]:
         if not option:
             raise HTTPException(status_code=404, detail="option_not_found")
 
-    sent = _send_option_to_telegram(job, option, result)
-    _append_log(req.job_id, f"Opcion {req.option_id} enviada a Telegram.")
+    sent = _send_option_to_telegram(job, option, result, request)
+    _append_log(req.job_id, f"Opcion {req.option_id} enviada a Telegram ({sent.get('method', 'unknown')}).")
     return {
         "ok": True,
         "job_id": req.job_id,
