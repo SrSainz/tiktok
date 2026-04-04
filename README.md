@@ -259,6 +259,24 @@ En la web:
 1. Pega la URL del backend (Railway) en `Backend URL`.
 2. Pulsa `Probar conexion`.
 
+### Vercel como proxy hacia el NAS
+
+Si quieres mantener `Vercel` como interfaz publica y usar el `NAS` en vez de Railway:
+
+- El frontend sigue en Vercel.
+- Las rutas `GET/POST /api/*` y `GET /output/*` se proxifican al backend del NAS por `SSH`.
+
+Variables necesarias en Vercel:
+
+- `NAS_SSH_HOST=nas.polysainz.com`
+- `NAS_SSH_PORT=22`
+- `NAS_SSH_USER=SrSainz`
+- `NAS_SSH_PRIVATE_KEY=<clave privada dedicada para Vercel>`
+- `NAS_BACKEND_HOST=127.0.0.1`
+- `NAS_BACKEND_PORT=8780`
+
+Con eso, `https://tiktok-xi-cyan.vercel.app` puede hablar con el backend del NAS sin exponer directamente el puerto interno del backend.
+
 ## Version NAS (recomendada para renders largos)
 
 Tambien puedes mover el backend al NAS y dejar Vercel solo para la web, o usar la interfaz servida por el propio NAS.

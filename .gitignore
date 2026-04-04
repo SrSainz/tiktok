@@ -44,3 +44,6 @@ tiktoks/
 Thumbs.db
 .vscode/
 .idea/
+
+# Node / Vercel proxy local deps
+node_modules/
