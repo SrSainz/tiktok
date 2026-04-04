@@ -12,6 +12,14 @@
     {
       "src": "index.html",
       "use": "@vercel/static"
+    },
+    {
+      "src": "terms.html",
+      "use": "@vercel/static"
+    },
+    {
+      "src": "privacy.html",
+      "use": "@vercel/static"
     }
   ],
   "routes": [
@@ -25,6 +33,14 @@
     },
     {
       "handle": "filesystem"
+    },
+    {
+      "src": "^/terms/?$",
+      "dest": "/terms.html"
+    },
+    {
+      "src": "^/privacy/?$",
+      "dest": "/privacy.html"
     },
     {
       "src": "/(.*)",
