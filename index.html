@@ -344,6 +344,29 @@
         return `${window.location.origin}${basePath}`;
       }
 
+      function chooseInitialBackend() {
+        const saved = normalizeBackend(localStorage.getItem("clip_backend_url") || "");
+        const inferred = normalizeBackend(inferBackendFromLocation());
+        if (!inferred) {
+          return saved;
+        }
+        try {
+          const host = new URL(inferred).hostname.toLowerCase();
+          if (host.endsWith(".vercel.app")) {
+            if (!saved) {
+              return inferred;
+            }
+            const savedHost = new URL(saved).hostname.toLowerCase();
+            if (savedHost.includes("railway.app")) {
+              return inferred;
+            }
+          }
+        } catch (_) {
+          return saved || inferred;
+        }
+        return saved || inferred;
+      }
+
       function resolveAssetUrl(url) {
         const raw = String(url || "").trim();
         if (!raw) {
@@ -573,7 +596,7 @@
       $("generateBtn").onclick = createJob;
 
       (function init() {
-        state.backend = normalizeBackend(localStorage.getItem("clip_backend_url") || inferBackendFromLocation());
+        state.backend = chooseInitialBackend();
         ui.backendUrl.value = state.backend;
         if (state.backend) {
           setStatus(ui.healthStatus, `Backend cargado: ${state.backend}`, false);
