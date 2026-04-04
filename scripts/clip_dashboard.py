@@ -658,6 +658,51 @@ def _window_cues(cues: List[CaptionCue], start: float, end: float) -> List[Capti
     return in_window
 
 
+def align_window_to_cues(
+    cues: List[CaptionCue],
+    start: float,
+    end: float,
+    source_duration: float,
+) -> tuple[float, float]:
+    if not cues:
+        return start, end
+
+    target_duration = max(1.0, end - start)
+    start_candidates = [
+        cue
+        for cue in cues
+        if (start - 1.0) <= cue.start <= (start + min(4.5, max(2.5, target_duration * 0.18)))
+    ]
+    if start_candidates:
+        best_start_cue = min(
+            start_candidates,
+            key=lambda cue: (
+                abs(cue.start - start),
+                -score_text(cue.text),
+            ),
+        )
+        start = best_start_cue.start
+
+    target_end = min(source_duration, start + target_duration)
+    end_candidates = [
+        cue
+        for cue in cues
+        if (target_end - min(4.5, max(2.5, target_duration * 0.18))) <= cue.end <= (target_end + 1.5)
+        and (cue.end - start) >= max(12.0, target_duration * 0.75)
+    ]
+    if end_candidates:
+        best_end_cue = min(end_candidates, key=lambda cue: abs(cue.end - target_end))
+        end = best_end_cue.end
+    else:
+        end = min(source_duration, target_end)
+
+    min_duration = max(12.0, target_duration * 0.72)
+    if end - start < min_duration:
+        end = min(source_duration, start + min_duration)
+
+    return max(0.0, start), min(source_duration, end)
+
+
 def _description_from_cues(in_window: List[CaptionCue]) -> tuple[str, str]:
     if not in_window:
         return "Momento destacado", "Fragmento con potencial de retencion."
@@ -755,6 +800,10 @@ def window_score(
     curiosity_rate = curiosity_hits / max(1.0, total_words)
     number_rate = number_hits / max(1.0, total_words)
     question_rate = question_hits / duration
+    opening_cues = [cue for cue in in_window if cue.start < start + min(6.0, duration * 0.28)]
+    opening_hook_score = max((score_text(cue.text) for cue in opening_cues), default=0.0)
+    dead_air_start = max(0.0, min(4.0, in_window[0].start - start))
+    dead_air_end = max(0.0, min(4.0, end - in_window[-1].end))
 
     interest_score = (
         speech_density * 11.5
@@ -762,6 +811,7 @@ def window_score(
         + impact_rate * 8.0
         + interest_hits * 1.8
         + punctuation_bonus * 0.35
+        + opening_hook_score * 2.2
     )
     reach_score = (
         speech_density * 9.5
@@ -770,6 +820,7 @@ def window_score(
         + question_rate * 120.0
         + impact_rate * 6.0
         + exclaim_hits * 0.2
+        + opening_hook_score * 1.4
     )
     audio_score = window_audio_score(rms_by_second or {}, start, end)
     visual_score = window_visual_score(scene_times or [], start, end)
@@ -780,6 +831,8 @@ def window_score(
         + audio_score * 0.12
         + visual_score * 0.09
     )
+    combined -= dead_air_start * 6.5
+    combined -= dead_air_end * 3.0
     short_desc, why = _description_from_cues(in_window)
     topic_tokens = extract_topic_tokens(in_window)
     transcript_preview = summarize_transcript_preview(in_window)
@@ -872,8 +925,14 @@ def build_candidate_segments(
 
     pool: List[CandidateSegment] = []
     if cues:
+        seen_ranges: set[tuple[int, int]] = set()
         for start in starts:
             end = start + window
+            start, end = align_window_to_cues(cues, start, end, source_duration)
+            range_key = (int(round(start * 10.0)), int(round(end * 10.0)))
+            if range_key in seen_ranges:
+                continue
+            seen_ranges.add(range_key)
             analysis = window_score(
                 cues,
                 start,

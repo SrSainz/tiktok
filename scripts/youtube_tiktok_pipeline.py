@@ -813,22 +813,24 @@ def render_short(
     hook_text: str,
     include_hook_overlay: bool = False,
 ) -> None:
-    filters = [
-        "scale=720:1280:force_original_aspect_ratio=increase",
-        "crop=720:1280",
-        "eq=contrast=1.06:saturation=1.14",
-    ]
+    base_comp = (
+        "[0:v]scale=720:1280:force_original_aspect_ratio=increase,"
+        "crop=720:1280,boxblur=18:10[bg];"
+        "[0:v]scale=720:1280:force_original_aspect_ratio=decrease,"
+        "eq=contrast=1.06:saturation=1.14[fg];"
+        "[bg][fg]overlay=(W-w)/2:(H-h)/2[v0]"
+    )
+    final_chain = "[v0]"
     if include_hook_overlay and hook_text.strip():
-        filters.extend(
-            [
-                "drawbox=x=40:y=100:w=1000:h=170:color=black@0.38:t=fill",
-                (
-                    "drawtext="
-                    f"font=Arial:text='{escape_drawtext(hook_text)}':"
-                    "x=(w-text_w)/2:y=145:fontsize=46:fontcolor=white:borderw=2:bordercolor=black"
-                ),
-            ]
+        final_chain = (
+            "[v0]drawbox=x=40:y=100:w=640:h=150:color=black@0.32:t=fill,"
+            "drawtext="
+            f"font=Arial:text='{escape_drawtext(hook_text)}':"
+            "x=(w-text_w)/2:y=138:fontsize=38:fontcolor=white:borderw=2:bordercolor=black[vout]"
         )
+        output_map = "[vout]"
+    else:
+        output_map = final_chain
 
     cmd = [
         ffmpeg_bin,
@@ -842,8 +844,12 @@ def render_short(
         str(input_video.name),
         "-t",
         f"{segment.end - segment.start:.3f}",
-        "-vf",
-        ",".join(filters),
+        "-filter_complex",
+        f"{base_comp};{final_chain}" if include_hook_overlay and hook_text.strip() else base_comp,
+        "-map",
+        output_map,
+        "-map",
+        "0:a?",
         "-af",
         "loudnorm=I=-16:TP=-1.5:LRA=11",
         "-r",
@@ -878,10 +884,12 @@ def render_short(
         return
 
     # Fallback for constrained hosts (Railway-like): lower resolution + lighter encode.
-    fallback_filters = [
-        "scale=540:960:force_original_aspect_ratio=increase",
-        "crop=540:960",
-    ]
+    fallback_comp = (
+        "[0:v]scale=540:960:force_original_aspect_ratio=increase,"
+        "crop=540:960,boxblur=14:8[bg];"
+        "[0:v]scale=540:960:force_original_aspect_ratio=decrease[fg];"
+        "[bg][fg]overlay=(W-w)/2:(H-h)/2[v]"
+    )
     fallback_cmd = [
         ffmpeg_bin,
         "-y",
@@ -894,8 +902,12 @@ def render_short(
         str(input_video.name),
         "-t",
         f"{segment.end - segment.start:.3f}",
-        "-vf",
-        ",".join(fallback_filters),
+        "-filter_complex",
+        fallback_comp,
+        "-map",
+        "[v]",
+        "-map",
+        "0:a?",
         "-af",
         "loudnorm=I=-16:TP=-1.5:LRA=11",
         "-r",
