@@ -16,6 +16,14 @@
   ],
   "routes": [
     {
+      "src": "^/api(?:/(.*))?$",
+      "dest": "/api/[...path].js"
+    },
+    {
+      "src": "^/output(?:/(.*))?$",
+      "dest": "/output/[...path].js"
+    },
+    {
       "handle": "filesystem"
     },
     {
