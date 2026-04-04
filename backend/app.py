@@ -186,7 +186,13 @@ def _serialize_result(result: Any) -> dict[str, Any]:
     options: list[dict[str, Any]] = []
     for opt in result.options:
         preview_path = str((Path(opt.manual_upload_file).resolve().parent / opt.preview_file).resolve())
+        poster_path = (
+            str((Path(opt.manual_upload_file).resolve().parent / opt.poster_file).resolve())
+            if getattr(opt, "poster_file", "")
+            else ""
+        )
         preview_url = _file_to_url(preview_path)
+        poster_url = _file_to_url(poster_path) if poster_path else None
         manual_url = _file_to_url(opt.manual_upload_file)
         options.append(
             {
@@ -202,9 +208,19 @@ def _serialize_result(result: Any) -> dict[str, Any]:
                 "hook": opt.hook,
                 "short_description": opt.short_description,
                 "why_it_may_work": opt.why_it_may_work,
+                "transcript_preview": getattr(opt, "transcript_preview", ""),
+                "cue_count": getattr(opt, "cue_count", 0),
+                "speech_density": getattr(opt, "speech_density", 0.0),
+                "question_hits": getattr(opt, "question_hits", 0),
+                "exclaim_hits": getattr(opt, "exclaim_hits", 0),
+                "number_hits": getattr(opt, "number_hits", 0),
+                "scene_cut_count": getattr(opt, "scene_cut_count", 0),
+                "signal_tags": getattr(opt, "signal_tags", []),
                 "preview_file": opt.preview_file,
+                "poster_file": getattr(opt, "poster_file", ""),
                 "manual_upload_file": opt.manual_upload_file,
                 "preview_url": preview_url,
+                "poster_url": poster_url,
                 "manual_upload_url": manual_url,
             }
         )

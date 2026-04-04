@@ -190,15 +190,56 @@
         margin-right: 5px;
         margin-bottom: 6px;
       }
+      .signal-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin-bottom: 8px;
+      }
+      .signal {
+        display: inline-flex;
+        align-items: center;
+        padding: 4px 8px;
+        border-radius: 999px;
+        border: 1px solid #26466f;
+        background: #0c203e;
+        color: #dceaff;
+        font-size: 11px;
+      }
       .clip .desc {
         font-size: 13px;
         color: #d3e0fb;
-        min-height: 40px;
+        min-height: 34px;
+        margin-bottom: 6px;
       }
       .clip .why {
         font-size: 12px;
         color: #98afd8;
         margin-top: 5px;
+      }
+      .clip .transcript {
+        margin-top: 10px;
+        padding: 10px;
+        border-radius: 10px;
+        background: #071223;
+        border: 1px solid #213b61;
+        color: #edf3ff;
+        font-size: 12px;
+        line-height: 1.45;
+      }
+      .clip .metrics {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin-top: 10px;
+      }
+      .clip .metric {
+        font-size: 11px;
+        color: #b7c8e8;
+        border: 1px solid #213b61;
+        background: #0a1830;
+        border-radius: 8px;
+        padding: 4px 7px;
       }
       .clip .links {
         margin-top: 10px;
@@ -388,6 +429,15 @@
         }
       }
 
+      function escapeHtml(value) {
+        return String(value ?? "")
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/\"/g, "&quot;")
+          .replace(/'/g, "&#39;");
+      }
+
       function readNumberInput(id, fallback) {
         const raw = String($(id).value ?? "").trim();
         if (!raw) {
@@ -488,8 +538,17 @@
           const card = document.createElement("article");
           card.className = "clip";
           const previewUrl = resolveAssetUrl(opt.preview_url);
+          const posterUrl = resolveAssetUrl(opt.poster_url);
           const manualUrl = resolveAssetUrl(opt.manual_upload_url);
-          const preview = previewUrl ? `<video controls playsinline preload="metadata" src="${previewUrl}"></video>` : "";
+          const preview = previewUrl
+            ? `<video controls playsinline preload="metadata" ${posterUrl ? `poster="${escapeHtml(posterUrl)}"` : ""} src="${escapeHtml(previewUrl)}"></video>`
+            : "";
+          const tags = Array.isArray(opt.signal_tags)
+            ? opt.signal_tags.map((tag) => `<span class="signal">${escapeHtml(tag)}</span>`).join("")
+            : "";
+          const transcript = opt.transcript_preview
+            ? `<div class="transcript">${escapeHtml(opt.transcript_preview)}</div>`
+            : "";
           card.innerHTML = `
             ${preview}
             <div class="body">
@@ -497,11 +556,19 @@
               <div class="pill">Score ${Number(opt.score).toFixed(1)}</div>
               <div class="pill">Interest ${Number(opt.interest_score).toFixed(1)}</div>
               <div class="pill">Reach ${Number(opt.reach_score).toFixed(1)}</div>
-              <div class="desc">${opt.short_description || ""}</div>
-              <div class="why">${opt.why_it_may_work || ""}</div>
+              ${tags ? `<div class="signal-row">${tags}</div>` : ""}
+              <div class="desc">${escapeHtml(opt.short_description || "")}</div>
+              <div class="why">${escapeHtml(opt.why_it_may_work || "")}</div>
+              ${transcript}
+              <div class="metrics">
+                <span class="metric">Audio ${Number(opt.audio_score || 0).toFixed(1)}</span>
+                <span class="metric">Visual ${Number(opt.visual_score || 0).toFixed(1)}</span>
+                <span class="metric">Cues ${Number(opt.cue_count || 0)}</span>
+                <span class="metric">Escenas ${Number(opt.scene_cut_count || 0)}</span>
+              </div>
               <div class="links">
-                ${previewUrl ? `<a href="${previewUrl}" target="_blank" rel="noreferrer">Preview</a>` : ""}
-                ${manualUrl ? `<a class="secondary" href="${manualUrl}" download rel="noreferrer">Descargar</a>` : ""}
+                ${previewUrl ? `<a href="${escapeHtml(previewUrl)}" target="_blank" rel="noreferrer">Preview</a>` : ""}
+                ${manualUrl ? `<a class="secondary" href="${escapeHtml(manualUrl)}" download rel="noreferrer">Descargar</a>` : ""}
               </div>
             </div>
           `;

@@ -63,7 +63,16 @@ class ClipOption:
     hook: str
     short_description: str
     why_it_may_work: str
+    transcript_preview: str
+    cue_count: int
+    speech_density: float
+    question_hits: int
+    exclaim_hits: int
+    number_hits: int
+    scene_cut_count: int
+    signal_tags: List[str]
     preview_file: str
+    poster_file: str
     manual_upload_file: str
 
 
@@ -76,7 +85,36 @@ class CandidateSegment:
     visual_score: float
     short_description: str
     why_it_may_work: str
+    transcript_preview: str
+    cue_count: int
+    speech_density: float
+    question_hits: int
+    exclaim_hits: int
+    number_hits: int
+    scene_cut_count: int
+    signal_tags: List[str]
     topic_tokens: set[str]
+
+
+@dataclass
+class WindowAnalysis:
+    score: float
+    interest_score: float
+    reach_score: float
+    audio_score: float
+    visual_score: float
+    cues: List[CaptionCue]
+    short_description: str
+    why_it_may_work: str
+    topic_tokens: set[str]
+    transcript_preview: str
+    cue_count: int
+    speech_density: float
+    question_hits: int
+    exclaim_hits: int
+    number_hits: int
+    scene_cut_count: int
+    signal_tags: List[str]
 
 
 @dataclass
@@ -535,6 +573,66 @@ def window_visual_score(scene_times: List[float], start: float, end: float) -> f
     return min(100.0, cuts_per_min * 11.0)
 
 
+def window_scene_cut_count(scene_times: List[float], start: float, end: float) -> int:
+    cuts = 0
+    for t in scene_times:
+        if t < start:
+            continue
+        if t > end:
+            break
+        cuts += 1
+    return cuts
+
+
+def summarize_transcript_preview(cues: List[CaptionCue], max_chars: int = 180) -> str:
+    text = " ".join(c.text.strip() for c in cues if c.text.strip())
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return ""
+    if len(text) <= max_chars:
+        return text
+    trimmed = text[: max_chars - 1]
+    if " " in trimmed:
+        trimmed = trimmed.rsplit(" ", 1)[0]
+    return f"{trimmed}…"
+
+
+def build_signal_tags(
+    *,
+    cue_count: int,
+    speech_density: float,
+    question_hits: int,
+    exclaim_hits: int,
+    number_hits: int,
+    audio_score: float,
+    visual_score: float,
+    scene_cut_count: int,
+) -> List[str]:
+    tags: List[str] = []
+    if question_hits > 0:
+        tags.append("Pregunta")
+    if number_hits > 0:
+        tags.append("Dato")
+    if exclaim_hits > 0:
+        tags.append("Impacto")
+    if speech_density >= 2.6 or cue_count >= 8:
+        tags.append("Mucho texto")
+    if audio_score >= 68.0:
+        tags.append("Audio alto")
+    elif audio_score >= 48.0:
+        tags.append("Audio estable")
+    if visual_score >= 58.0 or scene_cut_count >= 2:
+        tags.append("Cambio escena")
+    if not tags:
+        if visual_score >= audio_score and visual_score >= 35.0:
+            tags.append("Ritmo visual")
+        elif audio_score >= 35.0:
+            tags.append("Buen audio")
+        else:
+            tags.append("Momento claro")
+    return tags[:5]
+
+
 def extract_topic_tokens(cues: List[CaptionCue]) -> set[str]:
     blob = " ".join(c.text.lower() for c in cues)
     tokens = re.findall(r"[a-zA-Z0-9]{3,}", blob)
@@ -616,10 +714,28 @@ def window_score(
     end: float,
     rms_by_second: dict[int, float] | None = None,
     scene_times: List[float] | None = None,
-) -> tuple[float, float, float, float, float, List[CaptionCue], str, str, set[str]]:
+) -> WindowAnalysis:
     in_window = _window_cues(cues, start, end)
     if not in_window:
-        return 0.0, 0.0, 0.0, 0.0, 0.0, [], "Momento destacado", "Sin subtitulos suficientes.", set()
+        return WindowAnalysis(
+            score=0.0,
+            interest_score=0.0,
+            reach_score=0.0,
+            audio_score=0.0,
+            visual_score=0.0,
+            cues=[],
+            short_description="Momento destacado",
+            why_it_may_work="Sin subtitulos suficientes.",
+            topic_tokens=set(),
+            transcript_preview="",
+            cue_count=0,
+            speech_density=0.0,
+            question_hits=0,
+            exclaim_hits=0,
+            number_hits=0,
+            scene_cut_count=0,
+            signal_tags=[],
+        )
 
     duration = max(1.0, end - start)
     text_blob = " ".join(c.text for c in in_window)
@@ -657,6 +773,7 @@ def window_score(
     )
     audio_score = window_audio_score(rms_by_second or {}, start, end)
     visual_score = window_visual_score(scene_times or [], start, end)
+    scene_cut_count = window_scene_cut_count(scene_times or [], start, end)
     combined = (
         interest_score * 0.46
         + reach_score * 0.33
@@ -665,11 +782,42 @@ def window_score(
     )
     short_desc, why = _description_from_cues(in_window)
     topic_tokens = extract_topic_tokens(in_window)
+    transcript_preview = summarize_transcript_preview(in_window)
+    signal_tags = build_signal_tags(
+        cue_count=len(in_window),
+        speech_density=speech_density,
+        question_hits=question_hits,
+        exclaim_hits=exclaim_hits,
+        number_hits=number_hits,
+        audio_score=audio_score,
+        visual_score=visual_score,
+        scene_cut_count=scene_cut_count,
+    )
     if audio_score >= 65.0:
         why = f"{why} Audio con energia alta."
     if visual_score >= 55.0:
         why = f"{why} Ritmo visual dinamico."
-    return combined, interest_score, reach_score, audio_score, visual_score, in_window, short_desc, why, topic_tokens
+    if signal_tags:
+        why = f"{why} Senales: {', '.join(signal_tags)}."
+    return WindowAnalysis(
+        score=combined,
+        interest_score=interest_score,
+        reach_score=reach_score,
+        audio_score=audio_score,
+        visual_score=visual_score,
+        cues=in_window,
+        short_description=short_desc,
+        why_it_may_work=why,
+        topic_tokens=topic_tokens,
+        transcript_preview=transcript_preview,
+        cue_count=len(in_window),
+        speech_density=speech_density,
+        question_hits=question_hits,
+        exclaim_hits=exclaim_hits,
+        number_hits=number_hits,
+        scene_cut_count=scene_cut_count,
+        signal_tags=signal_tags,
+    )
 
 
 def _normalize(value: float, min_v: float, max_v: float) -> float:
@@ -726,36 +874,34 @@ def build_candidate_segments(
     if cues:
         for start in starts:
             end = start + window
-            (
-                score,
-                interest_score,
-                reach_score,
-                audio_score,
-                visual_score,
-                in_window,
-                short_desc,
-                why,
-                topic_tokens,
-            ) = window_score(
+            analysis = window_score(
                 cues,
                 start,
                 end,
                 rms_by_second=rms_by_second,
                 scene_times=scene_times,
             )
-            if score <= 0:
+            if analysis.score <= 0:
                 continue
-            hook = pick_hook(in_window)
+            hook = pick_hook(analysis.cues)
             pool.append(
                 CandidateSegment(
-                    segment=SegmentChoice(start=start, end=end, score=score, hook=hook),
-                    interest_score=interest_score,
-                    reach_score=reach_score,
-                    audio_score=audio_score,
-                    visual_score=visual_score,
-                    short_description=short_desc,
-                    why_it_may_work=why,
-                    topic_tokens=topic_tokens,
+                    segment=SegmentChoice(start=start, end=end, score=analysis.score, hook=hook),
+                    interest_score=analysis.interest_score,
+                    reach_score=analysis.reach_score,
+                    audio_score=analysis.audio_score,
+                    visual_score=analysis.visual_score,
+                    short_description=analysis.short_description,
+                    why_it_may_work=analysis.why_it_may_work,
+                    transcript_preview=analysis.transcript_preview,
+                    cue_count=analysis.cue_count,
+                    speech_density=analysis.speech_density,
+                    question_hits=analysis.question_hits,
+                    exclaim_hits=analysis.exclaim_hits,
+                    number_hits=analysis.number_hits,
+                    scene_cut_count=analysis.scene_cut_count,
+                    signal_tags=analysis.signal_tags,
+                    topic_tokens=analysis.topic_tokens,
                 )
             )
     else:
@@ -777,6 +923,23 @@ def build_candidate_segments(
                     visual_score=visual_score,
                     short_description="Momento variado del video sin subtitulos",
                     why_it_may_work="Seleccion por dinamica de audio y ritmo visual (sin texto).",
+                    transcript_preview="",
+                    cue_count=0,
+                    speech_density=0.0,
+                    question_hits=0,
+                    exclaim_hits=0,
+                    number_hits=0,
+                    scene_cut_count=window_scene_cut_count(scene_times or [], start, end),
+                    signal_tags=build_signal_tags(
+                        cue_count=0,
+                        speech_density=0.0,
+                        question_hits=0,
+                        exclaim_hits=0,
+                        number_hits=0,
+                        audio_score=audio_score,
+                        visual_score=visual_score,
+                        scene_cut_count=window_scene_cut_count(scene_times or [], start, end),
+                    ),
                     topic_tokens=set(),
                 )
             )
@@ -829,6 +992,33 @@ def pick_non_overlapping(pool: List[CandidateSegment], max_options: int, overlap
     return selected
 
 
+def extract_poster_frame(ffmpeg_bin: str, input_video: Path, output_image: Path, at_second: float = 0.8) -> None:
+    cmd = [
+        ffmpeg_bin,
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-ss",
+        f"{max(0.0, at_second):.3f}",
+        "-i",
+        str(input_video.name),
+        "-frames:v",
+        "1",
+        "-q:v",
+        "3",
+        str(output_image.name),
+    ]
+    proc = subprocess.run(cmd, cwd=input_video.parent, capture_output=True, text=True)
+    if proc.returncode == 0 and output_image.exists():
+        return
+    fallback_cmd = cmd.copy()
+    fallback_cmd[6] = "0.000"
+    proc_fb = subprocess.run(fallback_cmd, cwd=input_video.parent, capture_output=True, text=True)
+    if proc_fb.returncode != 0 or not output_image.exists():
+        raise RuntimeError((proc_fb.stderr or proc.stderr or "No se pudo generar poster.")[-1200:])
+
+
 def write_dashboard_html(
     out_html: Path,
     source_title: str,
@@ -837,21 +1027,36 @@ def write_dashboard_html(
 ) -> None:
     cards: List[str] = []
     for opt in options:
+        poster_attr = f' poster="{html.escape(opt.poster_file)}"' if opt.poster_file else ""
+        tags_html = "".join(f'<span class="tag">{html.escape(tag)}</span>' for tag in opt.signal_tags)
+        transcript_html = (
+            f'<p class="transcript">{html.escape(opt.transcript_preview)}</p>' if opt.transcript_preview else ""
+        )
         cards.append(
             f"""
             <article class="card">
-              <h2>Option {opt.option_id}</h2>
-              <p class="meta">Start: {opt.start:.1f}s | End: {opt.end:.1f}s | Global: {opt.score:.1f}</p>
-              <p class="meta">Interes: {opt.interest_score:.1f} | Alcance: {opt.reach_score:.1f} | Audio: {opt.audio_score:.1f} | Visual: {opt.visual_score:.1f}</p>
-              <p class="hook">{opt.short_description}</p>
-              <p class="why">{opt.why_it_may_work}</p>
-              <video controls preload="metadata" src="{opt.preview_file}"></video>
-              <code>Subir manualmente este archivo: {opt.manual_upload_file}</code>
+              <div class="topline">
+                <h2>Option {opt.option_id}</h2>
+                <span class="score">Score {opt.score:.1f}</span>
+              </div>
+              <p class="meta">Start: {opt.start:.1f}s | End: {opt.end:.1f}s | Interes: {opt.interest_score:.1f} | Alcance: {opt.reach_score:.1f}</p>
+              <video controls preload="metadata"{poster_attr} src="{html.escape(opt.preview_file)}"></video>
+              <div class="signals">{tags_html}</div>
+              <p class="hook">{html.escape(opt.short_description)}</p>
+              <p class="why">{html.escape(opt.why_it_may_work)}</p>
+              {transcript_html}
+              <div class="metrics">
+                <span>Audio {opt.audio_score:.1f}</span>
+                <span>Visual {opt.visual_score:.1f}</span>
+                <span>Cues {opt.cue_count}</span>
+                <span>Escenas {opt.scene_cut_count}</span>
+              </div>
+              <code>Subir manualmente este archivo: {html.escape(opt.manual_upload_file)}</code>
             </article>
             """
         )
 
-    html = f"""<!doctype html>
+    page_html = f"""<!doctype html>
 <html lang="es">
 <head>
   <meta charset="utf-8" />
@@ -895,11 +1100,26 @@ def write_dashboard_html(
       border: 1px solid #2d3746;
       border-radius: 14px;
       padding: 12px;
+      box-shadow: 0 18px 40px rgba(0,0,0,0.18);
+    }}
+    .topline {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
     }}
     .meta {{
       margin: 0 0 8px 0;
       color: var(--muted);
       font-size: 13px;
+    }}
+    .score {{
+      font-size: 12px;
+      color: #ffd9bf;
+      border: 1px solid #5b4736;
+      border-radius: 999px;
+      padding: 4px 8px;
+      background: rgba(255, 138, 61, 0.08);
     }}
     .hook {{
       margin: 0 0 10px 0;
@@ -918,6 +1138,46 @@ def write_dashboard_html(
       background: #000;
       margin-bottom: 8px;
       aspect-ratio: 9 / 16;
+    }}
+    .signals {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-bottom: 8px;
+    }}
+    .tag {{
+      display: inline-flex;
+      align-items: center;
+      border: 1px solid #31425b;
+      background: #121b28;
+      color: #dbe9ff;
+      border-radius: 999px;
+      padding: 4px 8px;
+      font-size: 12px;
+    }}
+    .transcript {{
+      margin: 10px 0 8px 0;
+      font-size: 13px;
+      color: #edf4ff;
+      line-height: 1.45;
+      padding: 10px;
+      background: #101722;
+      border: 1px solid #2b3443;
+      border-radius: 10px;
+    }}
+    .metrics {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-bottom: 10px;
+    }}
+    .metrics span {{
+      font-size: 12px;
+      color: #b9c9da;
+      border: 1px solid #2c3a4d;
+      border-radius: 8px;
+      padding: 4px 7px;
+      background: #111722;
     }}
     code {{
       display: block;
@@ -941,7 +1201,7 @@ def write_dashboard_html(
   </main>
 </body>
 </html>"""
-    out_html.write_text(html, encoding="utf-8")
+    out_html.write_text(page_html, encoding="utf-8")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1027,7 +1287,9 @@ def generate_dashboard(config: DashboardConfig, log_fn: Callable[[str], None] = 
     for idx, cand in enumerate(selected, start=1):
         seg = cand.segment
         preview_name = f"option_{idx:02}.mp4"
+        poster_name = f"option_{idx:02}.jpg"
         out_video = dashboard_dir / preview_name
+        poster_file = ""
         log_fn(f"Render option {idx}/{len(selected)} ({seg.start:.1f}s -> {seg.end:.1f}s)")
         render_short(
             ffmpeg_bin=ffmpeg_bin,
@@ -1038,6 +1300,11 @@ def generate_dashboard(config: DashboardConfig, log_fn: Callable[[str], None] = 
             include_hook_overlay=False,
         )
         (job_dir / preview_name).replace(out_video)
+        try:
+            extract_poster_frame(ffmpeg_bin, out_video, dashboard_dir / poster_name)
+            poster_file = poster_name
+        except Exception:
+            poster_file = ""
         options.append(
             ClipOption(
                 option_id=idx,
@@ -1052,7 +1319,16 @@ def generate_dashboard(config: DashboardConfig, log_fn: Callable[[str], None] = 
                 hook=seg.hook,
                 short_description=cand.short_description,
                 why_it_may_work=cand.why_it_may_work,
+                transcript_preview=cand.transcript_preview,
+                cue_count=cand.cue_count,
+                speech_density=cand.speech_density,
+                question_hits=cand.question_hits,
+                exclaim_hits=cand.exclaim_hits,
+                number_hits=cand.number_hits,
+                scene_cut_count=cand.scene_cut_count,
+                signal_tags=cand.signal_tags,
                 preview_file=preview_name,
+                poster_file=poster_file,
                 manual_upload_file=str(out_video),
             )
         )
