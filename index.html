@@ -466,9 +466,17 @@
           body: payload ? JSON.stringify(payload) : undefined,
           signal: controller.signal
         }).finally(() => clearTimeout(timeout));
-        const data = await res.json().catch(() => ({}));
+        const rawText = await res.text();
+        let data = {};
+        try {
+          data = rawText ? JSON.parse(rawText) : {};
+        } catch (_) {
+          data = {};
+        }
         if (!res.ok) {
-          throw new Error(data.detail || `HTTP ${res.status}`);
+          const missing = Array.isArray(data.missing) && data.missing.length ? ` (${data.missing.join(", ")})` : "";
+          const message = data.detail || data.error;
+          throw new Error(message ? `${message}${missing}` : `HTTP ${res.status}`);
         }
         return data;
       }
@@ -667,6 +675,7 @@
         ui.backendUrl.value = state.backend;
         if (state.backend) {
           setStatus(ui.healthStatus, `Backend cargado: ${state.backend}`, false);
+          checkHealth().catch(() => {});
         }
       })();
     </script>
