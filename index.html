@@ -241,6 +241,78 @@
         border-radius: 8px;
         padding: 4px 7px;
       }
+      .clip .social-pack {
+        margin-top: 10px;
+        padding: 10px;
+        border-radius: 10px;
+        background: linear-gradient(180deg, #091528, #0d1b34);
+        border: 1px solid #24456f;
+      }
+      .clip .social-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        margin-bottom: 8px;
+      }
+      .clip .social-label {
+        font-size: 11px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: #8ddcc9;
+      }
+      .clip .social-copy {
+        font-size: 11px;
+        color: #d9fff3;
+        border: 1px solid #2f7464;
+        background: #103327;
+        border-radius: 999px;
+        padding: 4px 8px;
+      }
+      .clip .social-title {
+        margin: 0 0 6px;
+        color: #fff0e0;
+        font-weight: 700;
+        font-size: 14px;
+        line-height: 1.35;
+      }
+      .clip .social-caption {
+        margin: 0;
+        color: #dbe7ff;
+        font-size: 12px;
+        line-height: 1.5;
+      }
+      .clip .hashtag-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin-top: 8px;
+      }
+      .clip .hashtag {
+        display: inline-flex;
+        align-items: center;
+        padding: 4px 8px;
+        border-radius: 999px;
+        border: 1px solid #4e3c35;
+        background: #1a1618;
+        color: #ffd8c3;
+        font-size: 11px;
+      }
+      .clip .copy-row {
+        margin-top: 8px;
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 6px;
+      }
+      .clip .copy-row button {
+        width: 100%;
+        background: #1b2d4f;
+        color: #dce9ff;
+        border: 1px solid #33507c;
+        font-size: 11px;
+        padding: 7px 8px;
+        border-radius: 8px;
+      }
       .clip .links {
         margin-top: 10px;
         display: flex;
@@ -617,6 +689,26 @@
         link.remove();
       }
 
+      async function copyText(value) {
+        const text = String(value || "").trim();
+        if (!text) {
+          throw new Error("No hay texto para copiar.");
+        }
+        if (navigator.clipboard?.writeText) {
+          await navigator.clipboard.writeText(text);
+          return;
+        }
+        const area = document.createElement("textarea");
+        area.value = text;
+        area.setAttribute("readonly", "readonly");
+        area.style.position = "absolute";
+        area.style.left = "-9999px";
+        document.body.appendChild(area);
+        area.select();
+        document.execCommand("copy");
+        area.remove();
+      }
+
       async function sendOptionToTelegram(optionId) {
         if (!state.jobId) {
           throw new Error("No hay job activo para compartir.");
@@ -635,14 +727,39 @@
           const previewUrl = resolveAssetUrl(opt.preview_url);
           const posterUrl = resolveAssetUrl(opt.poster_url);
           const manualUrl = resolveAssetUrl(opt.manual_upload_url);
+          const titleText = String(opt.tiktok_title || "").trim();
+          const captionText = String(opt.tiktok_caption || "").trim();
+          const hashtags = Array.isArray(opt.tiktok_hashtags) ? opt.tiktok_hashtags.filter(Boolean) : [];
+          const hashtagsText = hashtags.join(" ");
+          const fullPostText = [captionText, hashtagsText].filter(Boolean).join("\n");
           const preview = previewUrl
             ? `<video controls playsinline preload="metadata" ${posterUrl ? `poster="${escapeHtml(posterUrl)}"` : ""} src="${escapeHtml(previewUrl)}"></video>`
             : "";
           const tags = Array.isArray(opt.signal_tags)
             ? opt.signal_tags.map((tag) => `<span class="signal">${escapeHtml(tag)}</span>`).join("")
             : "";
+          const hashtagHtml = hashtags.map((tag) => `<span class="hashtag">${escapeHtml(tag)}</span>`).join("");
           const transcript = opt.transcript_preview
             ? `<div class="transcript">${escapeHtml(opt.transcript_preview)}</div>`
+            : "";
+          const socialPack = titleText || captionText || hashtags.length
+            ? `
+              <div class="social-pack">
+                <div class="social-head">
+                  <span class="social-label">TikTok prep</span>
+                  <span class="social-copy">listo para pegar</span>
+                </div>
+                ${titleText ? `<div class="social-title">${escapeHtml(titleText)}</div>` : ""}
+                ${captionText ? `<div class="social-caption">${escapeHtml(captionText)}</div>` : ""}
+                ${hashtagHtml ? `<div class="hashtag-row">${hashtagHtml}</div>` : ""}
+                <div class="copy-row">
+                  ${titleText ? `<button type="button" class="js-copy-title">Copiar titulo</button>` : ""}
+                  ${captionText ? `<button type="button" class="js-copy-caption">Copiar caption</button>` : ""}
+                  ${hashtags.length ? `<button type="button" class="js-copy-tags">Copiar hashtags</button>` : ""}
+                  ${(captionText || hashtags.length) ? `<button type="button" class="js-copy-post">Copiar post</button>` : ""}
+                </div>
+              </div>
+            `
             : "";
           card.innerHTML = `
             ${preview}
@@ -655,6 +772,7 @@
               <div class="desc">${escapeHtml(opt.short_description || "")}</div>
               <div class="why">${escapeHtml(opt.why_it_may_work || "")}</div>
               ${transcript}
+              ${socialPack}
               <div class="metrics">
                 <span class="metric">Audio ${Number(opt.audio_score || 0).toFixed(1)}</span>
                 <span class="metric">Visual ${Number(opt.visual_score || 0).toFixed(1)}</span>
@@ -693,6 +811,26 @@
               });
             }
           }
+          const copyActions = [
+            [".js-copy-title", titleText, `Titulo de la opcion ${opt.option_id} copiado.`],
+            [".js-copy-caption", captionText, `Caption de la opcion ${opt.option_id} copiado.`],
+            [".js-copy-tags", hashtagsText, `Hashtags de la opcion ${opt.option_id} copiados.`],
+            [".js-copy-post", fullPostText, `Post de la opcion ${opt.option_id} copiado.`]
+          ];
+          copyActions.forEach(([selector, value, okMessage]) => {
+            const button = card.querySelector(selector);
+            if (!button) {
+              return;
+            }
+            button.addEventListener("click", async () => {
+              try {
+                await copyText(value);
+                setStatus(ui.jobStatus, okMessage, false);
+              } catch (err) {
+                setStatus(ui.jobStatus, `No se pudo copiar la opcion ${opt.option_id}: ${err.message}`, true);
+              }
+            });
+          });
           ui.results.appendChild(card);
         });
       }

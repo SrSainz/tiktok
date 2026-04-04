@@ -80,7 +80,7 @@ CREATOR_CHANNEL_BLOCKLIST = {
 CREATOR_TITLE_BLOCKLIST = {
     "official trailer",
     "trailer oficial",
-    "tráiler oficial",
+    "trÃ¡iler oficial",
     "teaser",
     "official mv",
     "video oficial",
@@ -116,6 +116,9 @@ class ClipOption:
     number_hits: int
     scene_cut_count: int
     signal_tags: List[str]
+    tiktok_title: str
+    tiktok_caption: str
+    tiktok_hashtags: List[str]
     preview_file: str
     poster_file: str
     manual_upload_file: str
@@ -211,6 +214,32 @@ AI_HOOK_TERMS = {
     "primer",
 }
 
+TOPIC_HASHTAG_RULES = [
+    (("minecraft", "creeper", "survival", "mod"), ["#minecraft", "#gaming", "#espanol"]),
+    (("roblox",), ["#roblox", "#gaming", "#espanol"]),
+    (("clash", "clash royale", "brawl", "brawl stars"), ["#gaming", "#mobilegaming", "#espanol"]),
+    (("fortnite",), ["#fortnite", "#gaming", "#espanol"]),
+    (("velada", "boxeo", "combate"), ["#boxeo", "#velada", "#espanol"]),
+    (("entrevista", "podcast", "charla"), ["#podcast", "#clip", "#espanol"]),
+    (("historia", "curiosidad", "dato"), ["#curiosidades", "#viral", "#espanol"]),
+]
+
+
+SIGNAL_HASHTAG_RULES = {
+    "Pregunta": ["#pregunta", "#debate"],
+    "Dato": ["#dato", "#curiosidad"],
+    "Impacto": ["#impactante", "#momentazo"],
+    "Mucho texto": ["#storytime", "#clip"],
+    "Audio alto": ["#reaccion", "#momentazo"],
+    "Audio estable": ["#clip", "#espanol"],
+    "Cambio escena": ["#viral", "#clip"],
+    "Ritmo visual": ["#satisfying", "#clip"],
+    "Buen audio": ["#audio", "#clip"],
+    "Momento claro": ["#parati", "#viral"],
+}
+
+BASE_TIKTOK_HASHTAGS = ["#clips", "#viral", "#parati", "#espanol"]
+
 
 def _safe_age_days(upload_date: str | None, today: date) -> int | None:
     if not upload_date:
@@ -244,6 +273,95 @@ def _looks_like_corporate_creator_block(candidate: VideoCandidate) -> bool:
     if re.search(r"\b(mv|ost|bso|trailer|teaser)\b", title):
         return True
     return False
+
+
+def _clean_social_text(value: str, *, allow_punctuation: bool = True) -> str:
+    text = html.unescape(str(value or ""))
+    text = re.sub(r"\[[^\]]+\]", " ", text)
+    text = re.sub(r"\([^\)]*\)", " ", text)
+    text = re.sub(r"https?://\S+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip(" \t\r\n-_|:;,")
+    if not allow_punctuation:
+        text = re.sub(r"[^\w\s]", " ", text)
+        text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _truncate_copy(text: str, limit: int) -> str:
+    clean = _clean_social_text(text)
+    if len(clean) <= limit:
+        return clean
+    cut = clean[: limit - 1].rsplit(" ", 1)[0].strip()
+    return (cut or clean[: limit - 1].strip()) + "..."
+
+
+def _dedupe_keep_order(items: List[str]) -> List[str]:
+    seen: set[str] = set()
+    ordered: List[str] = []
+    for item in items:
+        key = item.strip().lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        ordered.append(item.strip())
+    return ordered
+
+
+def _build_topic_hashtags(*texts: str, signal_tags: List[str] | None = None) -> List[str]:
+    haystack = " ".join(
+        _clean_social_text(text, allow_punctuation=False).lower()
+        for text in texts
+        if text
+    ).strip()
+    hashtags: List[str] = []
+    for keywords, tags in TOPIC_HASHTAG_RULES:
+        if any(keyword in haystack for keyword in keywords):
+            hashtags.extend(tags)
+    for tag in signal_tags or []:
+        hashtags.extend(SIGNAL_HASHTAG_RULES.get(tag, []))
+    hashtags.extend(BASE_TIKTOK_HASHTAGS)
+    clean_tags: List[str] = []
+    for tag in hashtags:
+        slug = "#" + slugify(tag.lstrip("#"), max_len=24).replace("-", "")
+        if slug != "#":
+            clean_tags.append(slug.lower())
+    return _dedupe_keep_order(clean_tags)[:6]
+
+
+def build_tiktok_copy(
+    *,
+    source_title: str,
+    hook: str,
+    short_description: str,
+    why_it_may_work: str,
+    transcript_preview: str,
+    signal_tags: List[str],
+) -> tuple[str, str, List[str]]:
+    lead_candidates = [
+        _truncate_copy(hook, 72),
+        _truncate_copy(short_description, 72),
+        _truncate_copy(transcript_preview, 72),
+        _truncate_copy(source_title, 72),
+    ]
+    title = next((candidate for candidate in lead_candidates if candidate and len(candidate) >= 12), "")
+    if not title:
+        title = _truncate_copy(source_title or "Clip viral de la semana", 72)
+
+    caption = title
+    why_line = _truncate_copy(why_it_may_work, 110)
+    if why_line and why_line.lower() not in title.lower():
+        caption = f"{caption}. {why_line}"
+    if signal_tags:
+        caption = f"{caption} | {' · '.join(signal_tags[:3])}"
+    hashtags = _build_topic_hashtags(
+        source_title,
+        hook,
+        short_description,
+        transcript_preview,
+        why_it_may_work,
+        signal_tags=signal_tags,
+    )
+    return title, caption, hashtags
 
 
 def _creator_mode_candidates(candidates: List[VideoCandidate], log_fn: Callable[[str], None] | None = None) -> List[VideoCandidate]:
@@ -372,7 +490,7 @@ def discover_creator_videos(
             raise RuntimeError(f"YouTube Data API fallo en modo {mode}: {exc}") from exc
 
     if mode == "creators_es" and len(candidates) < max_results:
-        _log("Pool oficial de creadores escaso; completando con un pool curado de creadores españoles.")
+        _log("Pool oficial de creadores escaso; completando con un pool curado de creadores espaÃ±oles.")
         extra_channel_candidates = discover_from_channels(channels, per_channel_scan=max(6, min(per_channel_scan, 12)))
         seen_ids = {c.video_id for c in candidates if c.video_id}
         for c in extra_channel_candidates:
@@ -751,7 +869,7 @@ def summarize_transcript_preview(cues: List[CaptionCue], max_chars: int = 180) -
     trimmed = text[: max_chars - 1]
     if " " in trimmed:
         trimmed = trimmed.rsplit(" ", 1)[0]
-    return f"{trimmed}…"
+    return f"{trimmed}â€¦"
 
 
 def build_signal_tags(
@@ -1245,9 +1363,17 @@ def write_dashboard_html(
     for opt in options:
         poster_attr = f' poster="{html.escape(opt.poster_file)}"' if opt.poster_file else ""
         tags_html = "".join(f'<span class="tag">{html.escape(tag)}</span>' for tag in opt.signal_tags)
+        hashtags_html = "".join(f'<span class="tag social">{html.escape(tag)}</span>' for tag in opt.tiktok_hashtags)
         transcript_html = (
             f'<p class="transcript">{html.escape(opt.transcript_preview)}</p>' if opt.transcript_preview else ""
         )
+        social_html = f"""
+              <div class="social-pack">
+                <p class="social-title">{html.escape(opt.tiktok_title)}</p>
+                <p class="social-caption">{html.escape(opt.tiktok_caption)}</p>
+                <div class="signals social-tags">{hashtags_html}</div>
+              </div>
+        """
         cards.append(
             f"""
             <article class="card">
@@ -1261,6 +1387,7 @@ def write_dashboard_html(
               <p class="hook">{html.escape(opt.short_description)}</p>
               <p class="why">{html.escape(opt.why_it_may_work)}</p>
               {transcript_html}
+              {social_html}
               <div class="metrics">
                 <span>Audio {opt.audio_score:.1f}</span>
                 <span>Visual {opt.visual_score:.1f}</span>
@@ -1380,6 +1507,34 @@ def write_dashboard_html(
       background: #101722;
       border: 1px solid #2b3443;
       border-radius: 10px;
+    }}
+    .social-pack {{
+      margin: 10px 0 8px 0;
+      padding: 10px;
+      background: #111722;
+      border: 1px solid #2b3443;
+      border-radius: 10px;
+    }}
+    .social-title {{
+      margin: 0 0 6px 0;
+      color: #fff0e2;
+      font-size: 14px;
+      font-weight: 700;
+    }}
+    .social-caption {{
+      margin: 0;
+      color: #dbe7f5;
+      font-size: 13px;
+      line-height: 1.45;
+    }}
+    .social-tags {{
+      margin-top: 8px;
+      margin-bottom: 0;
+    }}
+    .tag.social {{
+      background: #192133;
+      color: #ffd5b4;
+      border-color: #523d30;
     }}
     .metrics {{
       display: flex;
@@ -1506,6 +1661,14 @@ def generate_dashboard(config: DashboardConfig, log_fn: Callable[[str], None] = 
         poster_name = f"option_{idx:02}.jpg"
         out_video = dashboard_dir / preview_name
         poster_file = ""
+        tiktok_title, tiktok_caption, tiktok_hashtags = build_tiktok_copy(
+            source_title=source_title,
+            hook=seg.hook,
+            short_description=cand.short_description,
+            why_it_may_work=cand.why_it_may_work,
+            transcript_preview=cand.transcript_preview,
+            signal_tags=cand.signal_tags,
+        )
         log_fn(f"Render option {idx}/{len(selected)} ({seg.start:.1f}s -> {seg.end:.1f}s)")
         render_short(
             ffmpeg_bin=ffmpeg_bin,
@@ -1543,6 +1706,9 @@ def generate_dashboard(config: DashboardConfig, log_fn: Callable[[str], None] = 
                 number_hits=cand.number_hits,
                 scene_cut_count=cand.scene_cut_count,
                 signal_tags=cand.signal_tags,
+                tiktok_title=tiktok_title,
+                tiktok_caption=tiktok_caption,
+                tiktok_hashtags=tiktok_hashtags,
                 preview_file=preview_name,
                 poster_file=poster_file,
                 manual_upload_file=str(out_video),
@@ -1601,3 +1767,4 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("[clip-dashboard] Interrumpido por usuario.")
         raise SystemExit(130)
+
