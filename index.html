@@ -316,6 +316,7 @@
       .clip .links {
         margin-top: 10px;
         display: flex;
+        flex-wrap: wrap;
         gap: 8px;
       }
       .clip a {
@@ -716,6 +717,13 @@
         return api("/api/share/telegram", { job_id: state.jobId, option_id: optionId }, 180000);
       }
 
+      async function sendOptionToTelegramForTikTok(optionId) {
+        if (!state.jobId) {
+          throw new Error("No hay job activo para publicar.");
+        }
+        return api("/api/publish/telegram-review", { job_id: state.jobId, option_id: optionId }, 180000);
+      }
+
       function renderResults(result) {
         state.lastResult = result || null;
         const options = result?.options || [];
@@ -783,12 +791,14 @@
                 ${previewUrl ? `<a href="${escapeHtml(previewUrl)}" target="_blank" rel="noreferrer">Preview</a>` : ""}
                 ${manualUrl ? `<button type="button" class="secondary js-download">Descargar</button>` : ""}
                 ${manualUrl ? `<button type="button" class="secondary js-send-telegram">Telegram</button>` : ""}
+                ${manualUrl ? `<button type="button" class="secondary js-send-tiktok-review">Telegram + TikTok</button>` : ""}
               </div>
             </div>
           `;
           if (manualUrl) {
             const downloadBtn = card.querySelector(".js-download");
             const sendBtn = card.querySelector(".js-send-telegram");
+            const reviewBtn = card.querySelector(".js-send-tiktok-review");
             if (downloadBtn) {
               downloadBtn.addEventListener("click", () => {
                 triggerDownload(manualUrl, opt.preview_file || `option_${opt.option_id}.mp4`);
@@ -807,6 +817,24 @@
                   setStatus(ui.jobStatus, `Telegram fallo en la opcion ${opt.option_id}: ${err.message}`, true);
                 } finally {
                   sendBtn.disabled = false;
+                }
+              });
+            }
+            if (reviewBtn) {
+              reviewBtn.addEventListener("click", async () => {
+                reviewBtn.disabled = true;
+                setStatus(ui.jobStatus, `Enviando opcion ${opt.option_id} a Telegram para aprobar TikTok...`, false);
+                try {
+                  const review = await sendOptionToTelegramForTikTok(opt.option_id);
+                  setStatus(
+                    ui.jobStatus,
+                    `Opcion ${opt.option_id} enviada a Telegram. Pulsa OK en el bot para subir a TikTok. Solicitud ${review.request_id}.`,
+                    false
+                  );
+                } catch (err) {
+                  setStatus(ui.jobStatus, `No se pudo preparar TikTok para la opcion ${opt.option_id}: ${err.message}`, true);
+                } finally {
+                  reviewBtn.disabled = false;
                 }
               });
             }
