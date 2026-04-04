@@ -73,6 +73,7 @@ class VideoCandidate:
     duration: Optional[int]
     channel: str
     video_id: str
+    category_id: str = ""
     upload_date: Optional[str] = None
     views_per_day: float = 0.0
     ai_score: float = 0.0
@@ -513,6 +514,7 @@ def enrich_candidates(candidates: List[VideoCandidate], limit: int) -> List[Vide
                     duration=info.get("duration") or c.duration,
                     channel=info.get("channel") or info.get("uploader") or c.channel,
                     video_id=info.get("id") or c.video_id,
+                    category_id=str(info.get("categories", [None])[0] or c.category_id or ""),
                     upload_date=info.get("upload_date") or c.upload_date,
                     ai_score=c.ai_score,
                     ai_reason=c.ai_reason,

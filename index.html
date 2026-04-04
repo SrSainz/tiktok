@@ -332,7 +332,7 @@
             </div>
             <div>
               <label for="optionsInput">Número de opciones</label>
-              <input id="optionsInput" type="number" min="2" max="12" value="6" />
+              <input id="optionsInput" type="number" min="1" max="12" value="6" />
             </div>
           </div>
           <div class="row">
@@ -455,6 +455,43 @@
           .replace(/'/g, "&#39;");
       }
 
+      function describeApiError(data, status) {
+        const fallback = `HTTP ${status}`;
+        if (!data || typeof data !== "object") {
+          return fallback;
+        }
+        const primary = data.detail ?? data.error ?? data.message;
+        if (typeof primary === "string" && primary.trim()) {
+          return primary.trim();
+        }
+        if (Array.isArray(primary)) {
+          const parts = primary
+            .map((item) => {
+              if (typeof item === "string") {
+                return item;
+              }
+              if (item && typeof item === "object") {
+                const loc = Array.isArray(item.loc) ? item.loc.join(".") : "";
+                const msg = typeof item.msg === "string" ? item.msg : "";
+                return [loc, msg].filter(Boolean).join(": ");
+              }
+              return "";
+            })
+            .filter(Boolean);
+          if (parts.length) {
+            return parts.join(" | ");
+          }
+        }
+        if (primary && typeof primary === "object") {
+          try {
+            return JSON.stringify(primary);
+          } catch (_) {
+            return fallback;
+          }
+        }
+        return fallback;
+      }
+
       function readNumberInput(id, fallback) {
         const raw = String($(id).value ?? "").trim();
         if (!raw) {
@@ -492,7 +529,7 @@
         }
         if (!res.ok) {
           const missing = Array.isArray(data.missing) && data.missing.length ? ` (${data.missing.join(", ")})` : "";
-          const message = data.detail || data.error;
+          const message = describeApiError(data, res.status);
           throw new Error(message ? `${message}${missing}` : `HTTP ${res.status}`);
         }
         return data;

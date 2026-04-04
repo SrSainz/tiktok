@@ -135,7 +135,7 @@ class DiscoverRequest(BaseModel):
 class CreateJobRequest(BaseModel):
     url: str = Field(min_length=8, max_length=500)
     duration: int = Field(default=60, ge=20, le=90)
-    options: int = Field(default=6, ge=2, le=12)
+    options: int = Field(default=6, ge=1, le=12)
     stride: int = Field(default=10, ge=5, le=30)
     overlap_ratio: float = Field(default=0.40, ge=0.10, le=0.80)
     language: str = Field(default="es", min_length=2, max_length=8)
