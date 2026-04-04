@@ -214,6 +214,13 @@ def _published_at_to_ymd(value: str | None) -> Optional[str]:
         return None
 
 
+def _extract_google_api_error_message(payload: dict) -> str:
+    err = payload.get("error") or {}
+    if isinstance(err, dict):
+        return str(err.get("message") or err.get("status") or "YouTube API error")
+    return str(err or "YouTube API error")
+
+
 def compute_views_per_day(view_count: int, upload_date: Optional[str], today: date) -> float:
     d = parse_upload_date_ymd(upload_date)
     if not d:
@@ -550,7 +557,13 @@ def discover_most_popular_es(
             params=params,
             timeout=20,
         )
-        resp.raise_for_status()
+        if not resp.ok:
+            try:
+                payload = resp.json()
+            except Exception:
+                payload = {}
+            message = _extract_google_api_error_message(payload)
+            raise RuntimeError(f"YouTube Data API request failed ({resp.status_code}): {message}")
         payload = resp.json()
         for item in payload.get("items") or []:
             video_id = item.get("id") or ""
