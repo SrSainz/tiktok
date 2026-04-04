@@ -286,9 +286,11 @@ def discover_creator_videos(
                         continue
                     candidates.append(c)
         except Exception as exc:
-            _log(f"Fallo YouTube Data API, usando fallback por canales: {exc}")
+            raise RuntimeError(f"YouTube Data API fallo en modo viral_es: {exc}") from exc
 
     if not candidates:
+        if mode == "viral_es":
+            _log("Sin charts ES disponibles. Usando fallback por canales; los resultados ya no son charts oficiales.")
         _log(f"Escaneando {len(channels)} canales...")
         candidates = discover_from_channels(channels, per_channel_scan=per_channel_scan)
     if not candidates:
