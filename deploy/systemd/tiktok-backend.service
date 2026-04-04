@@ -1,0 +1,18 @@
+[Unit]
+Description=Clip Studio ES Backend
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/SrSainz/apps/tiktok
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/home/SrSainz/apps/tiktok/.env
+ExecStartPre=/usr/bin/bash -lc 'mkdir -p /home/SrSainz/apps/tiktok/data /home/SrSainz/apps/tiktok/output /home/SrSainz/apps/tiktok/work'
+ExecStart=/home/SrSainz/apps/tiktok/.venv/bin/uvicorn backend.app:app --host 0.0.0.0 --port 8780
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+
+[Install]
+WantedBy=default.target

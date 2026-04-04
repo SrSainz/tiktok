@@ -23,6 +23,7 @@ from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -60,6 +61,7 @@ def _normalize_public_base_url(raw: str) -> str:
 
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", str(REPO_ROOT / "output"))).resolve()
 WORK_DIR = Path(os.getenv("WORK_DIR", str(REPO_ROOT / "work"))).resolve()
+FRONTEND_INDEX = REPO_ROOT / "index.html"
 BACKEND_PUBLIC_URL = (
     _normalize_public_base_url(os.getenv("RAILWAY_PUBLIC_DOMAIN", ""))
     or _normalize_public_base_url(os.getenv("RAILWAY_SERVICE_WEB_URL", ""))
@@ -298,6 +300,13 @@ def root() -> dict[str, Any]:
         "jobs": "/api/jobs",
         "output": "/output",
     }
+
+
+@app.get("/studio")
+def studio() -> FileResponse:
+    if not FRONTEND_INDEX.exists():
+        raise HTTPException(status_code=404, detail="studio_not_found")
+    return FileResponse(str(FRONTEND_INDEX), media_type="text/html")
 
 
 @app.post("/api/discover")

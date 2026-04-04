@@ -258,6 +258,42 @@ En la web:
 
 1. Pega la URL del backend (Railway) en `Backend URL`.
 2. Pulsa `Probar conexion`.
+
+## Version NAS (recomendada para renders largos)
+
+Tambien puedes mover el backend al NAS y dejar Vercel solo para la web, o usar la interfaz servida por el propio NAS.
+
+### Rutas NAS
+
+- App: `/home/SrSainz/apps/tiktok`
+- UI local NAS: `http://IP_DEL_NAS:8780/studio`
+- API health: `http://IP_DEL_NAS:8780/api/health`
+
+### Variables
+
+Copia `.env.example` a `.env` en el NAS y rellena:
+
+- `CORS_ORIGINS`
+- `YOUTUBE_API_KEY`
+- `YOUTUBE_TREND_CATEGORY_IDS`
+- `YTDLP_COOKIES_FILE`
+- `OUTPUT_DIR`
+- `WORK_DIR`
+
+### Deploy
+
+```bash
+cd /home/SrSainz/apps/tiktok
+chmod +x scripts/deploy_nas.sh
+./scripts/deploy_nas.sh
+```
+
+### Actualizar desde GitHub
+
+```bash
+cd /home/SrSainz/apps/tiktok
+./scripts/deploy_nas.sh
+```
 3. `Buscar virales`.
 4. Selecciona URL y `Generar clips`.
 

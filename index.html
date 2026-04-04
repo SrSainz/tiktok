@@ -236,8 +236,8 @@
       <section class="grid">
         <aside class="panel">
           <h2>Configuración</h2>
-          <label for="backendUrl">Backend URL (Railway)</label>
-          <input id="backendUrl" placeholder="https://tu-backend.up.railway.app" />
+          <label for="backendUrl">Backend URL</label>
+          <input id="backendUrl" placeholder="https://tu-backend.com o deja vacio si usas /studio en el mismo servidor" />
           <div class="row">
             <button class="btn secondary" id="saveBackendBtn">Guardar URL</button>
             <button class="btn secondary" id="healthBtn">Probar conexión</button>
@@ -333,6 +333,15 @@
 
       function normalizeBackend(url) {
         return (url || "").trim().replace(/\/+$/, "");
+      }
+
+      function inferBackendFromLocation() {
+        if (typeof window === "undefined" || !window.location || !/^https?:$/i.test(window.location.protocol)) {
+          return "";
+        }
+        const path = String(window.location.pathname || "");
+        const basePath = path.replace(/\/studio\/?$/i, "").replace(/\/+$/, "");
+        return `${window.location.origin}${basePath}`;
       }
 
       function resolveAssetUrl(url) {
@@ -564,7 +573,7 @@
       $("generateBtn").onclick = createJob;
 
       (function init() {
-        state.backend = normalizeBackend(localStorage.getItem("clip_backend_url") || "");
+        state.backend = normalizeBackend(localStorage.getItem("clip_backend_url") || inferBackendFromLocation());
         ui.backendUrl.value = state.backend;
         if (state.backend) {
           setStatus(ui.healthStatus, `Backend cargado: ${state.backend}`, false);
