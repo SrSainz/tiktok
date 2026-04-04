@@ -25,7 +25,7 @@ from urllib.parse import urlparse
 import requests
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -182,6 +182,8 @@ _jobs_lock = threading.Lock()
 _jobs: dict[str, dict[str, Any]] = {}
 _publish_lock = threading.Lock()
 _publish_requests: dict[str, dict[str, Any]] = {}
+_tiktok_oauth_lock = threading.Lock()
+_tiktok_oauth_states: dict[str, dict[str, Any]] = {}
 _telegram_session = requests.Session()
 _telegram_poller_started = False
 _telegram_update_offset = 0
@@ -371,6 +373,16 @@ def _build_absolute_asset_url(request: Request, relative_or_absolute_url: str) -
     if raw.startswith("/"):
         return f"{base}{raw}"
     return f"{base}/{raw}"
+
+
+def _request_public_base_url(request: Request) -> str:
+    if BACKEND_PUBLIC_URL:
+        return BACKEND_PUBLIC_URL.rstrip("/")
+    return str(request.base_url).rstrip("/")
+
+
+def _build_tiktok_redirect_uri(request: Request) -> str:
+    return f"{_request_public_base_url(request)}/api/tiktok/connect/callback"
 
 
 def _telegram_call(method: str, *, data: dict[str, Any], files: dict[str, Any] | None = None, timeout: int = 180) -> dict[str, Any]:
@@ -877,6 +889,88 @@ def health() -> dict[str, Any]:
         "tiktok_credentials_configured": _tiktok_credentials_configured(),
         "tiktok_tokens_file_exists": Path(TIKTOK_TOKENS_FILE).expanduser().exists(),
         "tiktok_ready": _tiktok_enabled(),
+    }
+
+
+@app.get("/api/tiktok/connect/start")
+def tiktok_connect_start(request: Request) -> dict[str, Any]:
+    if not _tiktok_credentials_configured():
+        raise HTTPException(status_code=503, detail="tiktok_credentials_not_configured")
+    redirect_uri = _build_tiktok_redirect_uri(request)
+    oauth = TikTokDesktopOAuth(
+        client_key=TIKTOK_CLIENT_KEY,
+        client_secret=TIKTOK_CLIENT_SECRET,
+        redirect_uri=redirect_uri,
+    )
+    state = oauth.generate_state()
+    code_verifier = oauth.generate_code_verifier()
+    code_challenge = oauth.code_challenge_from_verifier(code_verifier)
+    auth_url = oauth.build_authorize_url(
+        scopes=["video.publish"],
+        state=state,
+        code_challenge=code_challenge,
+    )
+    with _tiktok_oauth_lock:
+        _tiktok_oauth_states[state] = {
+            "code_verifier": code_verifier,
+            "redirect_uri": redirect_uri,
+            "created_at": _utc_now_iso(),
+        }
+    return {"ok": True, "auth_url": auth_url, "redirect_uri": redirect_uri}
+
+
+@app.get("/api/tiktok/connect/callback")
+def tiktok_connect_callback(code: str | None = None, state: str | None = None, error: str | None = None) -> HTMLResponse:
+    if error:
+        return HTMLResponse(f"<html><body><h2>TikTok autorizacion fallida</h2><p>{error}</p></body></html>", status_code=400)
+    if not code or not state:
+        return HTMLResponse("<html><body><h2>Falta code/state</h2></body></html>", status_code=400)
+    with _tiktok_oauth_lock:
+        flow = _tiktok_oauth_states.pop(state, None)
+    if not flow:
+        return HTMLResponse("<html><body><h2>Sesion OAuth invalida o expirada</h2></body></html>", status_code=400)
+
+    oauth = TikTokDesktopOAuth(
+        client_key=TIKTOK_CLIENT_KEY,
+        client_secret=TIKTOK_CLIENT_SECRET,
+        redirect_uri=str(flow["redirect_uri"]),
+    )
+    try:
+        tokens = oauth.exchange_code_for_tokens(code=code, code_verifier=str(flow["code_verifier"]))
+        save_tokens(tokens, Path(TIKTOK_TOKENS_FILE).expanduser().resolve())
+        client = TikTokDirectPostClient(tokens.access_token)
+        creator_info = client.query_creator_info()
+        creator_username = str((creator_info.get("data") or {}).get("creator_username") or "").strip()
+        expected_note = ""
+        if TIKTOK_EXPECTED_USERNAME:
+            normalized = creator_username.lstrip("@").lower()
+            expected_note = (
+                "<p>Cuenta esperada confirmada.</p>"
+                if normalized == TIKTOK_EXPECTED_USERNAME
+                else f"<p>Atencion: conectaste @{creator_username}, esperabamos @{TIKTOK_EXPECTED_USERNAME}.</p>"
+            )
+        return HTMLResponse(
+            f"<html><body><h2>TikTok conectado</h2><p>Cuenta: @{creator_username or 'desconocida'}</p>{expected_note}<p>Ya puedes volver a Clip Studio.</p></body></html>"
+        )
+    except Exception as exc:
+        return HTMLResponse(f"<html><body><h2>Error conectando TikTok</h2><p>{exc}</p></body></html>", status_code=500)
+
+
+@app.get("/api/tiktok/account")
+def tiktok_account() -> dict[str, Any]:
+    if not _tiktok_enabled():
+        raise HTTPException(status_code=503, detail="tiktok_not_connected")
+    client, creator_info, _tokens = _refresh_tiktok_tokens_if_needed()
+    data = creator_info.get("data") or {}
+    return {
+        "ok": True,
+        "creator_username": data.get("creator_username"),
+        "creator_nickname": data.get("creator_nickname"),
+        "privacy_level_options": data.get("privacy_level_options") or [],
+        "comment_disabled": bool(data.get("comment_disabled")),
+        "duet_disabled": bool(data.get("duet_disabled")),
+        "stitch_disabled": bool(data.get("stitch_disabled")),
+        "max_video_post_duration_sec": data.get("max_video_post_duration_sec"),
     }
 
 

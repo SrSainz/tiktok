@@ -371,6 +371,10 @@
             <button class="btn secondary" id="saveBackendBtn">Guardar URL</button>
             <button class="btn secondary" id="healthBtn">Probar conexión</button>
           </div>
+          <div class="row">
+            <button class="btn secondary" id="connectTikTokBtn">Conectar TikTok</button>
+            <button class="btn secondary" id="checkTikTokBtn">Ver cuenta TikTok</button>
+          </div>
           <div id="healthStatus" class="status">Sin comprobar</div>
 
           <h2 style="margin-top: 14px">Descubrir virales</h2>
@@ -939,14 +943,46 @@
           const data = await api("/api/health");
           const ytMode = data.youtube_api_configured ? "YouTube API ES activa" : "fallback scrape";
           const tgMode = data.telegram_configured ? "Telegram listo" : "Telegram no configurado";
-          setStatus(ui.healthStatus, `OK: ${data.service} | ${ytMode} | ${tgMode}`, false);
+          const ttMode = data.tiktok_ready
+            ? "TikTok listo"
+            : (data.tiktok_credentials_configured ? "TikTok sin conectar" : "TikTok no configurado");
+          setStatus(ui.healthStatus, `OK: ${data.service} | ${ytMode} | ${tgMode} | ${ttMode}`, false);
         } catch (err) {
           setStatus(ui.healthStatus, `Error backend: ${err.message}`, true);
         }
       }
 
+      async function connectTikTok() {
+        try {
+          const data = await api("/api/tiktok/connect/start");
+          if (!data?.auth_url) {
+            throw new Error("No se recibio auth_url.");
+          }
+          window.open(data.auth_url, "_blank", "noopener,noreferrer");
+          setStatus(ui.healthStatus, "Se abrio TikTok. Autoriza la app y vuelve aqui.", false);
+        } catch (err) {
+          setStatus(ui.healthStatus, `No se pudo iniciar TikTok: ${err.message}`, true);
+        }
+      }
+
+      async function checkTikTokAccount() {
+        try {
+          const data = await api("/api/tiktok/account");
+          const privacy = Array.isArray(data.privacy_level_options) ? data.privacy_level_options.join(", ") : "";
+          setStatus(
+            ui.healthStatus,
+            `TikTok conectado: @${data.creator_username || "desconocida"} | privacidad ${privacy || "n/d"} | max ${data.max_video_post_duration_sec || "?"}s`,
+            false
+          );
+        } catch (err) {
+          setStatus(ui.healthStatus, `TikTok no disponible: ${err.message}`, true);
+        }
+      }
+
       $("saveBackendBtn").onclick = saveBackendUrl;
       $("healthBtn").onclick = checkHealth;
+      $("connectTikTokBtn").onclick = connectTikTok;
+      $("checkTikTokBtn").onclick = checkTikTokAccount;
       $("discoverBtn").onclick = discover;
       $("generateBtn").onclick = createJob;
 
