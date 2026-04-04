@@ -257,6 +257,21 @@
         font-size: 12px;
         font-weight: 600;
       }
+      .clip .links button {
+        flex: 1;
+        width: auto;
+        color: #07243e;
+        background: #90e7c6;
+        padding: 7px 8px;
+        border-radius: 8px;
+        border: 0;
+        font-size: 12px;
+        font-weight: 600;
+      }
+      .clip .links button:disabled {
+        opacity: 0.65;
+        cursor: wait;
+      }
       .clip a.secondary {
         background: #90e7c6;
       }
@@ -344,6 +359,7 @@
       const state = {
         backend: "",
         jobId: "",
+        lastResult: null,
         logCursor: 0,
         pollTimer: null,
         pollFailures: 0,
@@ -538,7 +554,32 @@
         ui.jobLogs.scrollTop = ui.jobLogs.scrollHeight;
       }
 
+      function triggerDownload(url, filename = "") {
+        if (!url) {
+          return;
+        }
+        const link = document.createElement("a");
+        link.href = url;
+        link.rel = "noreferrer";
+        if (filename) {
+          link.download = filename;
+        } else {
+          link.download = "";
+        }
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+      }
+
+      async function sendOptionToTelegram(optionId) {
+        if (!state.jobId) {
+          throw new Error("No hay job activo para compartir.");
+        }
+        return api("/api/share/telegram", { job_id: state.jobId, option_id: optionId }, 180000);
+      }
+
       function renderResults(result) {
+        state.lastResult = result || null;
         const options = result?.options || [];
         ui.resultMeta.textContent = `${result?.source_title || "Video"} | ${options.length} opciones`;
         ui.results.innerHTML = "";
@@ -576,10 +617,28 @@
               </div>
               <div class="links">
                 ${previewUrl ? `<a href="${escapeHtml(previewUrl)}" target="_blank" rel="noreferrer">Preview</a>` : ""}
-                ${manualUrl ? `<a class="secondary" href="${escapeHtml(manualUrl)}" download rel="noreferrer">Descargar</a>` : ""}
+                ${manualUrl ? `<button type="button" class="secondary js-send-telegram">Descargar + Telegram</button>` : ""}
               </div>
             </div>
           `;
+          if (manualUrl) {
+            const sendBtn = card.querySelector(".js-send-telegram");
+            if (sendBtn) {
+              sendBtn.addEventListener("click", async () => {
+                sendBtn.disabled = true;
+                triggerDownload(manualUrl, opt.preview_file || `option_${opt.option_id}.mp4`);
+                setStatus(ui.jobStatus, `Enviando opcion ${opt.option_id} a Telegram...`, false);
+                try {
+                  await sendOptionToTelegram(opt.option_id);
+                  setStatus(ui.jobStatus, `Opcion ${opt.option_id} descargada y enviada a Telegram.`, false);
+                } catch (err) {
+                  setStatus(ui.jobStatus, `La descarga salio, pero Telegram fallo: ${err.message}`, true);
+                } finally {
+                  sendBtn.disabled = false;
+                }
+              });
+            }
+          }
           ui.results.appendChild(card);
         });
       }
@@ -659,7 +718,8 @@
         try {
           const data = await api("/api/health");
           const ytMode = data.youtube_api_configured ? "YouTube API ES activa" : "fallback scrape";
-          setStatus(ui.healthStatus, `OK: ${data.service} | ${ytMode}`, false);
+          const tgMode = data.telegram_configured ? "Telegram listo" : "Telegram no configurado";
+          setStatus(ui.healthStatus, `OK: ${data.service} | ${ytMode} | ${tgMode}`, false);
         } catch (err) {
           setStatus(ui.healthStatus, `Error backend: ${err.message}`, true);
         }

@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+import requests
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -69,6 +70,9 @@ BACKEND_PUBLIC_URL = (
 )
 YTDLP_COOKIES_FILE = os.getenv("YTDLP_COOKIES_FILE", "").strip()
 YTDLP_COOKIES_TEXT = os.getenv("YTDLP_COOKIES_TEXT", "")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+TELEGRAM_MESSAGE_THREAD_ID = os.getenv("TELEGRAM_MESSAGE_THREAD_ID", "").strip()
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 WORK_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -136,6 +140,11 @@ class CreateJobRequest(BaseModel):
     language: str = Field(default="es", min_length=2, max_length=8)
 
 
+class ShareTelegramRequest(BaseModel):
+    job_id: str = Field(min_length=8, max_length=80)
+    option_id: int = Field(ge=1, le=99)
+
+
 app = FastAPI(title="Clip Studio ES API", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
@@ -149,6 +158,7 @@ app.mount("/output", StaticFiles(directory=str(OUTPUT_DIR), check_dir=False), na
 
 _jobs_lock = threading.Lock()
 _jobs: dict[str, dict[str, Any]] = {}
+_telegram_session = requests.Session()
 
 
 def _safe_rel_to_output(file_path: str) -> str | None:
@@ -236,6 +246,81 @@ def _serialize_result(result: Any) -> dict[str, Any]:
     }
 
 
+def _telegram_enabled() -> bool:
+    return bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)
+
+
+def _build_telegram_caption(job: dict[str, Any], option: dict[str, Any], result: dict[str, Any]) -> str:
+    source_title = str(result.get("source_title") or "Clip Studio ES").strip()
+    source_url = str(result.get("source_url") or "").strip()
+    short_desc = str(option.get("short_description") or "").strip()
+    why = str(option.get("why_it_may_work") or "").strip()
+    hook = str(option.get("hook") or "").strip()
+    tags = option.get("signal_tags") or []
+    tag_text = ", ".join(str(tag) for tag in tags[:5]) if tags else "sin senales"
+
+    lines = [
+        "Clip listo para revisar",
+        f"video: {source_title}",
+        f"opcion: {option.get('option_id')}",
+        f"tramo: {float(option.get('start') or 0):.1f}s -> {float(option.get('end') or 0):.1f}s",
+    ]
+    if hook:
+        lines.append(f"hook: {hook}")
+    if short_desc:
+        lines.append(f"descripcion: {short_desc}")
+    if why:
+        lines.append(f"por que: {why}")
+    lines.append(f"senales: {tag_text}")
+    if source_url:
+        lines.append(f"fuente: {source_url}")
+    return "\n".join(lines)[:1000]
+
+
+def _send_option_to_telegram(job: dict[str, Any], option: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+    if not _telegram_enabled():
+        raise HTTPException(status_code=503, detail="telegram_not_configured")
+
+    video_path = Path(str(option.get("manual_upload_file") or "")).resolve()
+    if not video_path.exists() or not video_path.is_file():
+        raise HTTPException(status_code=404, detail="video_file_not_found")
+
+    caption = _build_telegram_caption(job, option, result)
+    data: dict[str, Any] = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "caption": caption,
+        "supports_streaming": True,
+    }
+    if TELEGRAM_MESSAGE_THREAD_ID:
+        data["message_thread_id"] = TELEGRAM_MESSAGE_THREAD_ID
+
+    with video_path.open("rb") as fh:
+        files = {
+            "video": (video_path.name, fh, "video/mp4"),
+        }
+        try:
+            response = _telegram_session.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendVideo",
+                data=data,
+                files=files,
+                timeout=180,
+            )
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            raise HTTPException(status_code=502, detail=f"telegram_send_failed: {exc}") from exc
+
+    body = response.json()
+    if not body.get("ok"):
+        raise HTTPException(status_code=502, detail=f"telegram_send_failed: {body}")
+
+    result_obj = body.get("result") or {}
+    return {
+        "ok": True,
+        "message_id": result_obj.get("message_id"),
+        "chat_id": TELEGRAM_CHAT_ID,
+    }
+
+
 def _append_log(job_id: str, message: str) -> None:
     with _jobs_lock:
         job = _jobs.get(job_id)
@@ -303,6 +388,7 @@ def health() -> dict[str, Any]:
         "cookies_file_exists": _cookie_file_is_usable(YTDLP_COOKIES_FILE),
         "cookies_inline_configured": bool(YTDLP_COOKIES_TEXT.strip()),
         "youtube_api_configured": bool(os.getenv("YOUTUBE_API_KEY", "").strip()),
+        "telegram_configured": _telegram_enabled(),
     }
 
 
@@ -381,3 +467,27 @@ def get_job(job_id: str, since_log: int = Query(default=0, ge=0)) -> dict[str, A
             "result": job["result"],
             "error": job["error"],
         }
+
+
+@app.post("/api/share/telegram")
+def share_option_to_telegram(req: ShareTelegramRequest) -> dict[str, Any]:
+    with _jobs_lock:
+        job = _jobs.get(req.job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="job_not_found")
+        result = job.get("result")
+        if not result:
+            raise HTTPException(status_code=409, detail="job_not_completed")
+        options = result.get("options") or []
+        option = next((opt for opt in options if int(opt.get("option_id") or 0) == req.option_id), None)
+        if not option:
+            raise HTTPException(status_code=404, detail="option_not_found")
+
+    sent = _send_option_to_telegram(job, option, result)
+    _append_log(req.job_id, f"Opcion {req.option_id} enviada a Telegram.")
+    return {
+        "ok": True,
+        "job_id": req.job_id,
+        "option_id": req.option_id,
+        **sent,
+    }
