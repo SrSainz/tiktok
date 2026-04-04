@@ -474,7 +474,26 @@
       }
 
       function normalizeBackend(url) {
-        return (url || "").trim().replace(/\/+$/, "");
+        const raw = (url || "").trim().replace(/\/+$/, "");
+        if (!raw) {
+          return "";
+        }
+        try {
+          const parsed = new URL(raw);
+          const path = String(parsed.pathname || "");
+          if (!path || path === "/") {
+            return `${parsed.origin}`;
+          }
+          if (
+            /^\/studio\/?$/i.test(path) ||
+            /^\/api(\/.*)?$/i.test(path)
+          ) {
+            return `${parsed.origin}`;
+          }
+          return `${parsed.origin}${path.replace(/\/+$/, "")}`;
+        } catch (_) {
+          return raw;
+        }
       }
 
       function inferBackendFromLocation() {
@@ -598,12 +617,23 @@
         }
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), timeoutMs);
-        const res = await fetch(`${state.backend}${path}`, {
-          method: payload ? "POST" : "GET",
-          headers: payload ? { "Content-Type": "application/json" } : undefined,
-          body: payload ? JSON.stringify(payload) : undefined,
-          signal: controller.signal
-        }).finally(() => clearTimeout(timeout));
+        let res;
+        try {
+          res = await fetch(`${state.backend}${path}`, {
+            method: payload ? "POST" : "GET",
+            headers: payload ? { "Content-Type": "application/json" } : undefined,
+            body: payload ? JSON.stringify(payload) : undefined,
+            signal: controller.signal
+          });
+        } catch (err) {
+          clearTimeout(timeout);
+          if (err?.name === "AbortError") {
+            throw new Error(`Timeout conectando con el backend (${timeoutMs / 1000}s). Revisa la Backend URL y el tunel.`);
+          }
+          throw err;
+        } finally {
+          clearTimeout(timeout);
+        }
         const rawText = await res.text();
         let data = {};
         try {
@@ -954,7 +984,7 @@
 
       async function connectTikTok() {
         try {
-          const data = await api("/api/tiktok/connect/start");
+          const data = await api("/api/tiktok/connect/start", undefined, 45000);
           if (!data?.auth_url) {
             throw new Error("No se recibio auth_url.");
           }
@@ -967,7 +997,7 @@
 
       async function checkTikTokAccount() {
         try {
-          const data = await api("/api/tiktok/account");
+          const data = await api("/api/tiktok/account", undefined, 45000);
           const privacy = Array.isArray(data.privacy_level_options) ? data.privacy_level_options.join(", ") : "";
           setStatus(
             ui.healthStatus,
