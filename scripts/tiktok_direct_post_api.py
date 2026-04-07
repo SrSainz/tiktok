@@ -20,7 +20,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import math
 import os
 import secrets
 import threading
@@ -162,6 +161,8 @@ def _guess_mime_type(path: Path) -> str:
 def _build_chunk_plan(file_size: int, preferred_chunk_size: int = 10 * 1024 * 1024) -> tuple[int, int]:
     # TikTok media transfer guide:
     # - Each chunk 5MB..64MB, except final chunk may exceed configured chunk_size (up to 128MB).
+    # - total_chunk_count is video_size / chunk_size rounded down.
+    # - The final chunk absorbs the remainder and may therefore be larger than chunk_size.
     # - For files <5MB upload as a whole.
     if file_size <= 0:
         raise ValueError("File size must be > 0 bytes.")
@@ -170,9 +171,26 @@ def _build_chunk_plan(file_size: int, preferred_chunk_size: int = 10 * 1024 * 10
     max_chunk = 64 * 1024 * 1024
     if file_size < min_chunk:
         chunk_size = file_size
-    else:
-        chunk_size = max(min(preferred_chunk_size, max_chunk), min_chunk)
-    total_chunks = int(math.ceil(file_size / float(chunk_size)))
+        total_chunks = 1
+        return chunk_size, total_chunks
+
+    # For any file that fits in TikTok's normal max chunk size, upload it as a single whole chunk.
+    if file_size <= max_chunk:
+        return file_size, 1
+
+    chunk_size = min(max(min(preferred_chunk_size, max_chunk), min_chunk), file_size)
+
+    # TikTok requires uploads >64MB to be split across multiple chunks.
+    if file_size > max_chunk and chunk_size >= file_size:
+        chunk_size = max(min_chunk, min(max_chunk, file_size // 2))
+
+    total_chunks = max(1, file_size // chunk_size)
+
+    # Keep a safety guard so we never declare one chunk for files >64MB.
+    if file_size > max_chunk and total_chunks < 2:
+        chunk_size = max(min_chunk, min(max_chunk, file_size // 2))
+        total_chunks = max(2, file_size // chunk_size)
+
     return chunk_size, total_chunks
 
 
@@ -458,19 +476,21 @@ class TikTokDirectPostClient:
         upload_url: str,
         video_path: Path,
         chunk_size: int,
+        total_chunk_count: int,
         progress_cb: Optional[Callable[[int, int, int], None]] = None,
     ) -> None:
         if not video_path.exists():
             raise FileNotFoundError(f"Video not found: {video_path}")
         total_size = video_path.stat().st_size
         mime_type = _guess_mime_type(video_path)
-        total_chunks = int(math.ceil(total_size / float(chunk_size)))
+        total_chunks = max(1, int(total_chunk_count))
 
         with video_path.open("rb") as f:
             for idx in range(total_chunks):
                 start = idx * chunk_size
                 f.seek(start)
-                data = f.read(chunk_size)
+                read_size = chunk_size if idx < total_chunks - 1 else total_size - start
+                data = f.read(read_size)
                 if not data:
                     break
                 end = start + len(data) - 1
@@ -555,11 +575,15 @@ class TikTokDirectPostClient:
             raise RuntimeError("TikTok init response did not return publish_id.")
         if not upload_url:
             raise RuntimeError("TikTok init response did not return upload_url for FILE_UPLOAD.")
-        chunk_size, _ = _build_chunk_plan(video_path.stat().st_size, preferred_chunk_size=preferred_chunk_size)
+        chunk_size, total_chunk_count = _build_chunk_plan(
+            video_path.stat().st_size,
+            preferred_chunk_size=preferred_chunk_size,
+        )
         self.upload_video_chunks(
             upload_url=upload_url,
             video_path=video_path,
             chunk_size=chunk_size,
+            total_chunk_count=total_chunk_count,
             progress_cb=progress_cb,
         )
         return self.wait_for_publish_completion(
@@ -634,13 +658,17 @@ def _cmd_upload_only(args: argparse.Namespace) -> int:
         raise RuntimeError("TikTok upload init response did not return upload_url.")
 
     file_size = video_path.stat().st_size
-    chunk_size, _ = _build_chunk_plan(file_size, preferred_chunk_size=args.chunk_size)
+    chunk_size, total_chunk_count = _build_chunk_plan(file_size, preferred_chunk_size=args.chunk_size)
     print(f"[upload-only] publish_id={publish_id}")
-    print(f"[upload-only] Uploading {video_path.name} in chunks of {chunk_size} bytes...")
+    print(
+        f"[upload-only] Uploading {video_path.name} in {total_chunk_count} chunk(s) "
+        f"with chunk_size={chunk_size} bytes..."
+    )
     client.upload_video_chunks(
         upload_url=upload_url,
         video_path=video_path,
         chunk_size=chunk_size,
+        total_chunk_count=total_chunk_count,
         progress_cb=lambda done, total, sent: print(f"[upload-only] chunk {done}/{total} sent_bytes={sent}"),
     )
     print("[upload-only] Upload complete.")
