@@ -361,7 +361,7 @@ def _should_try_browser_fallback(exc: Exception) -> bool:
     )
 
 
-def _run_tiktok_browser_fallback(video_path: Path, caption: str) -> dict[str, Any]:
+def _run_tiktok_browser_fallback(video_path: Path, caption: str, privacy_level: str) -> dict[str, Any]:
     script = SCRIPTS_DIR / "upload_to_tiktok.py"
     if not script.exists():
         raise RuntimeError(f"No existe el uploader browser fallback: {script}")
@@ -373,6 +373,8 @@ def _run_tiktok_browser_fallback(video_path: Path, caption: str) -> dict[str, An
         str(video_path),
         "--caption",
         caption[:2200],
+        "--privacy-level",
+        privacy_level,
         "--manual-wait",
         str(TIKTOK_BROWSER_MANUAL_WAIT),
         "--browser-channel",
@@ -845,7 +847,11 @@ def _run_tiktok_publish(request_id: str) -> None:
                 req["job_id"],
                 f"Opcion {req['option_id']} cambiando a fallback navegador por bloqueo API: {exc}",
             )
-            browser_result = _run_tiktok_browser_fallback(video_path=video_path, caption=title)
+            browser_result = _run_tiktok_browser_fallback(
+                video_path=video_path,
+                caption=title,
+                privacy_level=privacy_level,
+            )
             browser_status = str((browser_result.get("result") or {}).get("status") or "browser_fallback")
             _set_publish_state(
                 request_id,

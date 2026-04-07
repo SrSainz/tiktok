@@ -8,11 +8,144 @@ import json
 import os
 import re
 import sys
+import unicodedata
 from pathlib import Path
 
 
 def log(msg: str) -> None:
     print(f"[tiktok-upload] {msg}")
+
+
+PRIVACY_LABELS = {
+    "SELF_ONLY": "Solo tú",
+    "MUTUAL_FOLLOW_FRIENDS": "Amigos",
+    "PUBLIC_TO_EVERYONE": "Todo el mundo",
+}
+
+
+def _normalize_text(value: str) -> str:
+    normalized = unicodedata.normalize("NFKD", value or "")
+    return "".join(ch for ch in normalized if not unicodedata.combining(ch)).strip().lower()
+
+
+def _current_privacy_text(visibility) -> str:
+    try:
+        return _normalize_text(visibility.inner_text(timeout=3000))
+    except Exception:
+        return ""
+
+
+def _iter_privacy_candidates(page):
+    selectors = [
+        "div.Select__item",
+        "[role='option']",
+        "div[aria-selected]",
+    ]
+    seen: set[tuple[str, str, int]] = set()
+    for selector in selectors:
+        locator = page.locator(selector)
+        try:
+            count = locator.count()
+        except Exception:
+            count = 0
+        for idx in range(count):
+            item = locator.nth(idx)
+            try:
+                text = _normalize_text(item.inner_text(timeout=1000))
+            except Exception:
+                continue
+            key = (selector, text, idx)
+            if not text or key in seen:
+                continue
+            seen.add(key)
+            yield item, text
+
+
+def _click_privacy_via_dom(page, target: str) -> bool:
+    try:
+        page.wait_for_function(
+            "() => document.querySelectorAll(\"div.Select__item, [role='option'], div[aria-selected]\").length > 0",
+            timeout=5000,
+        )
+    except Exception:
+        return False
+
+    return bool(
+        page.evaluate(
+            """
+            (target) => {
+              const normalize = (value) =>
+                (value || "")
+                  .normalize("NFKD")
+                  .replace(/[\\u0300-\\u036f]/g, "")
+                  .trim()
+                  .toLowerCase();
+              const selectors = ["div.Select__item", "[role='option']", "div[aria-selected]"];
+              for (const selector of selectors) {
+                const nodes = Array.from(document.querySelectorAll(selector));
+                for (const node of nodes) {
+                  if (normalize(node.innerText || node.textContent || "").includes(target)) {
+                    node.click();
+                    return true;
+                  }
+                }
+              }
+              return false;
+            }
+            """,
+            target,
+        )
+    )
+
+
+def _apply_privacy_with_keyboard(page, visibility, privacy_level: str) -> bool:
+    target = _normalize_text(PRIVACY_LABELS.get(privacy_level, privacy_level))
+    if _current_privacy_text(visibility) == target:
+        return True
+
+    for _attempt in range(3):
+        visibility.click(timeout=10000)
+        page.wait_for_timeout(500)
+        matched = _click_privacy_via_dom(page, target)
+        for item, text in _iter_privacy_candidates(page):
+            if target in text:
+                item.click(timeout=10000, force=True)
+                page.wait_for_timeout(700)
+                matched = True
+                break
+        if _current_privacy_text(visibility) == target:
+            return True
+        if matched:
+            page.wait_for_timeout(300)
+        try:
+            page.keyboard.press("Escape")
+        except Exception:
+            pass
+        page.wait_for_timeout(250)
+    return _current_privacy_text(visibility) == target
+
+
+def _pick_existing_upload_page(context):
+    candidates = []
+    for page in context.pages:
+        try:
+            if "tiktokstudio/upload" not in page.url:
+                continue
+            body_text = page.locator("body").inner_text(timeout=2500)
+            score = 0
+            if "Publicar" in body_text or "Post" in body_text:
+                score += 3
+            if "Cargado" in body_text or "Loaded" in body_text:
+                score += 2
+            if "Guardar borrador" in body_text or "Draft" in body_text:
+                score += 1
+            candidates.append((score, page))
+        except Exception:
+            continue
+    if not candidates:
+        return None
+    candidates.sort(key=lambda row: row[0], reverse=True)
+    return candidates[0][1]
 
 
 def pick_latest_video(output_dir: Path) -> Path:
@@ -25,6 +158,7 @@ def pick_latest_video(output_dir: Path) -> Path:
 def upload(
     video_path: Path,
     caption: str,
+    privacy_level: str,
     profile_dir: Path,
     headless: bool,
     auto_post: bool,
@@ -76,17 +210,25 @@ def upload(
 
             context = p.chromium.launch_persistent_context(**launch_kwargs)
 
-        page = context.new_page()
-        page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-
-        log("Abriendo TikTok upload...")
-        page.goto("https://www.tiktok.com/upload?lang=es", wait_until="domcontentloaded")
+        page = _pick_existing_upload_page(context) if using_cdp else None
+        if page is None:
+            page = context.new_page()
+            page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+            log("Abriendo TikTok upload...")
+            page.goto("https://www.tiktok.com/tiktokstudio/upload?lang=es", wait_until="domcontentloaded")
+        else:
+            log("Reutilizando pestaña existente de TikTok Studio.")
+            page.bring_to_front()
 
         file_selector = None
         selectors = ["input[type='file']", "input[accept*='video']", "input[data-e2e*='upload']"]
         for sel in selectors:
             try:
-                page.wait_for_selector(sel, timeout=35000)
+                locator = page.locator(sel).first
+                if locator.count() > 0:
+                    file_selector = sel
+                    break
+                page.wait_for_selector(sel, timeout=35000, state="attached")
                 file_selector = sel
                 break
             except Exception:
@@ -99,6 +241,7 @@ def upload(
 
         page.set_input_files(file_selector, str(video_path))
         log(f"Video cargado: {video_path.name}")
+        page.wait_for_timeout(1500)
 
         if caption:
             try:
@@ -109,12 +252,23 @@ def upload(
             except Exception:
                 log("No se pudo autocompletar caption; revisa manualmente.")
 
+        if privacy_level:
+            try:
+                privacy_label = PRIVACY_LABELS.get(privacy_level, privacy_level)
+                visibility = page.locator("[data-e2e='video_visibility_container'] button[role='combobox']").first
+                if _apply_privacy_with_keyboard(page, visibility, privacy_level):
+                    log(f"Privacidad ajustada a: {privacy_label}")
+                else:
+                    log("No se encontro la opcion de privacidad deseada; se mantiene el valor actual.")
+            except Exception:
+                log("No se pudo ajustar la privacidad automaticamente; se mantiene el valor actual.")
+
         if auto_post:
             post_btn = page.get_by_role("button", name=re.compile(r"(Publicar|Post)", re.I)).first
             post_btn.click(timeout=20000)
             log("Intentando publicar automaticamente...")
             try:
-                page.wait_for_url(re.compile(r"^https://www\.tiktok\.com/(?!upload)"), timeout=45000)
+                page.wait_for_url(re.compile(r"^https://www\.tiktok\.com/(?!.*upload)"), timeout=45000)
                 status = "publish_navigation_detected"
             except Exception:
                 page.wait_for_timeout(15000)
@@ -134,6 +288,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--video", default="", help="Ruta a .mp4")
     p.add_argument("--latest-from", default="output", help="Carpeta para detectar ultimo .mp4")
     p.add_argument("--caption", default="")
+    p.add_argument("--privacy-level", default="SELF_ONLY")
     p.add_argument("--profile-dir", default=".tiktok_profile")
     p.add_argument("--headless", action="store_true")
     p.add_argument("--auto-post", action="store_true")
@@ -184,6 +339,7 @@ def main() -> int:
         result = upload(
             video_path=video,
             caption=args.caption,
+            privacy_level=args.privacy_level,
             profile_dir=Path(args.profile_dir),
             headless=args.headless,
             auto_post=args.auto_post,
