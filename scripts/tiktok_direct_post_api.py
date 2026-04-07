@@ -115,6 +115,13 @@ def _raise_for_api_payload_error(payload: dict[str, Any], default_message: str) 
     raise TikTokApiError(message, payload=payload)
 
 
+def _ensure_oauth_token_payload(payload: dict[str, Any], default_message: str) -> None:
+    if payload.get("access_token"):
+        return
+    message = _extract_tiktok_error(payload) or default_message
+    raise TikTokApiError(message, payload=payload)
+
+
 def _request_with_retries(
     method: str,
     url: str,
@@ -227,7 +234,9 @@ class TikTokDesktopOAuth:
             data=body,
         )
         _raise_for_tiktok_error(response, "Failed to exchange authorization code for access token.")
-        return OAuthTokens.from_dict(response.json())
+        payload = response.json()
+        _ensure_oauth_token_payload(payload, "TikTok token response did not include an access token.")
+        return OAuthTokens.from_dict(payload)
 
     def refresh_access_token(self, refresh_token: str) -> OAuthTokens:
         body = {
@@ -243,7 +252,9 @@ class TikTokDesktopOAuth:
             data=body,
         )
         _raise_for_tiktok_error(response, "Failed to refresh access token.")
-        return OAuthTokens.from_dict(response.json())
+        payload = response.json()
+        _ensure_oauth_token_payload(payload, "TikTok refresh response did not include an access token.")
+        return OAuthTokens.from_dict(payload)
 
     def authorize_interactive(
         self,
@@ -564,7 +575,13 @@ def save_tokens(tokens: OAuthTokens, path: Path) -> None:
 
 
 def load_tokens(path: Path) -> OAuthTokens:
-    data = json.loads(path.read_text(encoding="utf-8"))
+    raw = path.read_text(encoding="utf-8").strip()
+    if not raw:
+        raise RuntimeError(f"Token file is empty: {path}")
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Token file is invalid JSON: {path}") from exc
     return OAuthTokens.from_dict(data)
 
 
