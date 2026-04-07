@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import sys
@@ -34,7 +35,7 @@ def upload(
     chrome_user_data_dir: str,
     chrome_profile_directory: str,
     connect_cdp: str,
-) -> None:
+) -> dict[str, str]:
     try:
         from playwright.sync_api import TimeoutError as PwTimeout
         from playwright.sync_api import sync_playwright
@@ -94,7 +95,7 @@ def upload(
         if not file_selector:
             log("No se detecto input de carga. Puede ser bloqueo/login. Te dejo el navegador abierto para hacerlo manual.")
             page.wait_for_timeout(manual_wait * 1000)
-            return
+            return {"ok": "false", "status": "file_input_not_found"}
 
         page.set_input_files(file_selector, str(video_path))
         log(f"Video cargado: {video_path.name}")
@@ -103,7 +104,8 @@ def upload(
             try:
                 caption_box = page.locator("div[contenteditable='true']").first
                 caption_box.click(timeout=15000)
-                caption_box.fill(caption[:150])
+                caption_box.fill("")
+                page.keyboard.insert_text(caption[:2200])
             except Exception:
                 log("No se pudo autocompletar caption; revisa manualmente.")
 
@@ -111,13 +113,20 @@ def upload(
             post_btn = page.get_by_role("button", name=re.compile(r"(Publicar|Post)", re.I)).first
             post_btn.click(timeout=20000)
             log("Intentando publicar automaticamente...")
-            page.wait_for_timeout(15000)
+            try:
+                page.wait_for_url(re.compile(r"^https://www\.tiktok\.com/(?!upload)"), timeout=45000)
+                status = "publish_navigation_detected"
+            except Exception:
+                page.wait_for_timeout(15000)
+                status = "post_clicked"
         else:
             log(f"Listo para revisar/publicar manualmente. Esperando {manual_wait}s...")
             page.wait_for_timeout(manual_wait * 1000)
+            status = "manual_review"
 
         if not using_cdp:
             context.close()
+        return {"ok": "true", "status": status}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -143,6 +152,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=os.path.join(os.environ.get("LOCALAPPDATA", ""), "BraveSoftware", "Brave-Browser", "User Data"),
     )
     p.add_argument("--brave-profile-directory", default="Default")
+    p.add_argument("--json", action="store_true")
     return p
 
 
@@ -171,7 +181,7 @@ def main() -> int:
             user_data_dir = args.brave_user_data_dir
             profile_directory = args.brave_profile_directory
 
-        upload(
+        result = upload(
             video_path=video,
             caption=args.caption,
             profile_dir=Path(args.profile_dir),
@@ -185,6 +195,8 @@ def main() -> int:
             chrome_profile_directory=profile_directory,
             connect_cdp=args.connect_cdp,
         )
+        if args.json:
+            print(json.dumps(result, ensure_ascii=False))
         return 0
     except KeyboardInterrupt:
         log("Interrumpido por usuario.")

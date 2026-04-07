@@ -12,6 +12,7 @@ Exposes:
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 import threading
 import traceback
@@ -89,6 +90,21 @@ TIKTOK_REDIRECT_URI = os.getenv("TIKTOK_REDIRECT_URI", "http://127.0.0.1:8765/ca
 TIKTOK_TOKENS_FILE = os.getenv("TIKTOK_TOKENS_FILE", str(REPO_ROOT / ".tiktok_tokens.json")).strip()
 TIKTOK_DEFAULT_PRIVACY = os.getenv("TIKTOK_DEFAULT_PRIVACY", "SELF_ONLY").strip() or "SELF_ONLY"
 TIKTOK_EXPECTED_USERNAME = os.getenv("TIKTOK_EXPECTED_USERNAME", "").strip().lstrip("@").lower()
+TIKTOK_BROWSER_FALLBACK_ENABLED = (
+    os.getenv("TIKTOK_BROWSER_FALLBACK_ENABLED", "0").strip().lower() not in {"0", "false", "no", "off", ""}
+)
+TIKTOK_BROWSER_CONNECT_CDP = os.getenv("TIKTOK_BROWSER_CONNECT_CDP", "").strip()
+TIKTOK_BROWSER_CHANNEL = os.getenv("TIKTOK_BROWSER_CHANNEL", "brave").strip() or "brave"
+TIKTOK_BROWSER_EXECUTABLE = os.getenv("TIKTOK_BROWSER_EXECUTABLE", "").strip()
+TIKTOK_BROWSER_PROFILE_DIR = os.getenv("TIKTOK_BROWSER_PROFILE_DIR", str(REPO_ROOT / ".tiktok_profile")).strip()
+TIKTOK_BROWSER_MANUAL_WAIT = int(os.getenv("TIKTOK_BROWSER_MANUAL_WAIT", "45").strip() or "45")
+TIKTOK_BROWSER_AUTO_POST = os.getenv("TIKTOK_BROWSER_AUTO_POST", "1").strip().lower() not in {"0", "false", "no", "off"}
+TIKTOK_BROWSER_USE_SYSTEM_PROFILE = (
+    os.getenv("TIKTOK_BROWSER_USE_SYSTEM_PROFILE", "1").strip().lower() not in {"0", "false", "no", "off"}
+)
+TIKTOK_BROWSER_USER_DATA_DIR = os.getenv("TIKTOK_BROWSER_USER_DATA_DIR", "").strip()
+TIKTOK_BROWSER_PROFILE_DIRECTORY = os.getenv("TIKTOK_BROWSER_PROFILE_DIRECTORY", "Default").strip() or "Default"
+TIKTOK_BROWSER_TIMEOUT_SEC = int(os.getenv("TIKTOK_BROWSER_TIMEOUT_SEC", "900").strip() or "900")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 WORK_DIR.mkdir(parents=True, exist_ok=True)
 TIKTOK_VERIFICATION_DIR.mkdir(parents=True, exist_ok=True)
@@ -329,6 +345,82 @@ def _compose_tiktok_post_text(option: dict[str, Any]) -> str:
     hash_line = " ".join(str(tag).strip() for tag in hashtags if str(tag).strip())
     post_text = "\n".join(part for part in [caption, hash_line] if part).strip()
     return post_text[:2200]
+
+
+def _should_try_browser_fallback(exc: Exception) -> bool:
+    message = str(exc).lower()
+    if not TIKTOK_BROWSER_FALLBACK_ENABLED:
+        return False
+    return any(
+        needle in message
+        for needle in (
+            "content-sharing-guidelines",
+            "integration guidelines",
+            "review our integration guidelines",
+        )
+    )
+
+
+def _run_tiktok_browser_fallback(video_path: Path, caption: str) -> dict[str, Any]:
+    script = SCRIPTS_DIR / "upload_to_tiktok.py"
+    if not script.exists():
+        raise RuntimeError(f"No existe el uploader browser fallback: {script}")
+
+    cmd = [
+        sys.executable,
+        str(script),
+        "--video",
+        str(video_path),
+        "--caption",
+        caption[:2200],
+        "--manual-wait",
+        str(TIKTOK_BROWSER_MANUAL_WAIT),
+        "--browser-channel",
+        TIKTOK_BROWSER_CHANNEL,
+        "--json",
+    ]
+    if TIKTOK_BROWSER_AUTO_POST:
+        cmd.append("--auto-post")
+    if TIKTOK_BROWSER_CONNECT_CDP:
+        cmd.extend(["--connect-cdp", TIKTOK_BROWSER_CONNECT_CDP])
+    if TIKTOK_BROWSER_EXECUTABLE:
+        cmd.extend(["--browser-executable", TIKTOK_BROWSER_EXECUTABLE])
+    if TIKTOK_BROWSER_PROFILE_DIR:
+        cmd.extend(["--profile-dir", TIKTOK_BROWSER_PROFILE_DIR])
+    if TIKTOK_BROWSER_USE_SYSTEM_PROFILE:
+        cmd.append("--use-system-chrome-profile")
+    if TIKTOK_BROWSER_USER_DATA_DIR:
+        cmd.extend(["--chrome-user-data-dir", TIKTOK_BROWSER_USER_DATA_DIR])
+    if TIKTOK_BROWSER_PROFILE_DIRECTORY:
+        cmd.extend(["--chrome-profile-directory", TIKTOK_BROWSER_PROFILE_DIRECTORY])
+
+    proc = subprocess.run(
+        cmd,
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+        timeout=TIKTOK_BROWSER_TIMEOUT_SEC,
+    )
+    stdout = (proc.stdout or "").strip()
+    stderr = (proc.stderr or "").strip()
+    if proc.returncode != 0:
+        detail = stderr or stdout or f"codigo {proc.returncode}"
+        raise RuntimeError(f"Browser fallback fallo: {detail[:1200]}")
+
+    result: dict[str, Any] = {}
+    if stdout:
+        last_line = stdout.splitlines()[-1].strip()
+        try:
+            result = json.loads(last_line)
+        except Exception:
+            result = {"ok": "true", "status": "unknown", "raw": last_line}
+    if not result:
+        result = {"ok": "true", "status": "unknown"}
+    return {
+        "result": result,
+        "stdout": stdout[-2000:],
+        "stderr": stderr[-1000:],
+    }
 
 
 def _build_telegram_review_caption(job: dict[str, Any], option: dict[str, Any], result: dict[str, Any]) -> str:
@@ -732,15 +824,44 @@ def _run_tiktok_publish(request_id: str) -> None:
         _set_publish_state(request_id, creator_username=creator_username, privacy_level=privacy_level)
         _append_publish_log(request_id, f"Subiendo a TikTok como @{creator_username or 'desconocido'} en modo {privacy_level}.")
 
-        status_payload = client.direct_post_file(
-            video_path=video_path,
-            title=title,
-            privacy_level=privacy_level,
-            disable_duet=disable_duet,
-            disable_comment=disable_comment,
-            disable_stitch=disable_stitch,
-            video_cover_timestamp_ms=1000,
-        )
+        try:
+            status_payload = client.direct_post_file(
+                video_path=video_path,
+                title=title,
+                privacy_level=privacy_level,
+                disable_duet=disable_duet,
+                disable_comment=disable_comment,
+                disable_stitch=disable_stitch,
+                video_cover_timestamp_ms=1000,
+            )
+        except Exception as exc:
+            if not _should_try_browser_fallback(exc):
+                raise
+            _append_publish_log(
+                request_id,
+                "TikTok API oficial rechazo el post por guidelines. Probando fallback por navegador...",
+            )
+            _append_log(
+                req["job_id"],
+                f"Opcion {req['option_id']} cambiando a fallback navegador por bloqueo API: {exc}",
+            )
+            browser_result = _run_tiktok_browser_fallback(video_path=video_path, caption=title)
+            browser_status = str((browser_result.get("result") or {}).get("status") or "browser_fallback")
+            _set_publish_state(
+                request_id,
+                status="completed",
+                tiktok_status=f"BROWSER_{browser_status.upper()}",
+                publish_id=None,
+                creator_username=creator_username,
+            )
+            _append_publish_log(request_id, f"Fallback navegador completado: {browser_status}.")
+            if browser_result.get("stdout"):
+                _append_publish_log(request_id, f"Uploader browser: {browser_result['stdout'][-400:]}")
+            _notify_publish_result(
+                request_id,
+                f"OK TikTok web: opcion {req['option_id']} enviada por navegador en @{creator_username or 'cuenta conectada'}.",
+            )
+            return
         status_data = status_payload.get("data") or {}
         final_status = str(status_data.get("status") or "UNKNOWN")
         publish_id = str(status_data.get("publish_id") or "")
@@ -891,6 +1012,8 @@ def health() -> dict[str, Any]:
         "tiktok_credentials_configured": _tiktok_credentials_configured(),
         "tiktok_tokens_file_exists": Path(TIKTOK_TOKENS_FILE).expanduser().exists(),
         "tiktok_ready": _tiktok_enabled(),
+        "tiktok_browser_fallback_enabled": TIKTOK_BROWSER_FALLBACK_ENABLED,
+        "tiktok_browser_connect_cdp": bool(TIKTOK_BROWSER_CONNECT_CDP),
     }
 
 
