@@ -905,16 +905,12 @@ def tiktok_connect_start(request: Request) -> dict[str, Any]:
         redirect_uri=redirect_uri,
     )
     state = oauth.generate_state()
-    code_verifier = oauth.generate_code_verifier()
-    code_challenge = oauth.code_challenge_from_verifier(code_verifier)
     auth_url = oauth.build_authorize_url(
         scopes=["video.publish"],
         state=state,
-        code_challenge=code_challenge,
     )
     with _tiktok_oauth_lock:
         _tiktok_oauth_states[state] = {
-            "code_verifier": code_verifier,
             "redirect_uri": redirect_uri,
             "created_at": _utc_now_iso(),
         }
@@ -952,7 +948,8 @@ def tiktok_connect_callback(code: str | None = None, state: str | None = None, e
         redirect_uri=str(flow["redirect_uri"]),
     )
     try:
-        tokens = oauth.exchange_code_for_tokens(code=code, code_verifier=str(flow["code_verifier"]))
+        code_verifier = str(flow.get("code_verifier") or "").strip() or None
+        tokens = oauth.exchange_code_for_tokens(code=code, code_verifier=code_verifier)
         save_tokens(tokens, Path(TIKTOK_TOKENS_FILE).expanduser().resolve())
         client = TikTokDirectPostClient(tokens.access_token)
         creator_info = client.query_creator_info()

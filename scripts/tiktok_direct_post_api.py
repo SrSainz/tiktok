@@ -192,27 +192,34 @@ class TikTokDesktopOAuth:
         # TikTok desktop docs require SHA256 hex encoding.
         return hashlib.sha256(code_verifier.encode("utf-8")).hexdigest()
 
-    def build_authorize_url(self, scopes: Iterable[str], state: str, code_challenge: str) -> str:
+    def build_authorize_url(
+        self,
+        scopes: Iterable[str],
+        state: str,
+        code_challenge: str | None = None,
+    ) -> str:
         params = {
             "client_key": self.client_key,
             "response_type": "code",
             "scope": ",".join(scopes),
             "redirect_uri": self.redirect_uri,
             "state": state,
-            "code_challenge": code_challenge,
-            "code_challenge_method": "S256",
         }
+        if code_challenge:
+            params["code_challenge"] = code_challenge
+            params["code_challenge_method"] = "S256"
         return f"{AUTH_URL}?{urlencode(params, quote_via=quote)}"
 
-    def exchange_code_for_tokens(self, code: str, code_verifier: str) -> OAuthTokens:
+    def exchange_code_for_tokens(self, code: str, code_verifier: str | None = None) -> OAuthTokens:
         body = {
             "client_key": self.client_key,
             "client_secret": self.client_secret,
             "code": code,
             "grant_type": "authorization_code",
             "redirect_uri": self.redirect_uri,
-            "code_verifier": code_verifier,
         }
+        if code_verifier:
+            body["code_verifier"] = code_verifier
         response = _request_with_retries(
             "POST",
             TOKEN_URL,
