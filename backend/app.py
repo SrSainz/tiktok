@@ -254,6 +254,10 @@ class PrepareTikTokReviewRequest(BaseModel):
     privacy_level: str | None = Field(default=None, min_length=3, max_length=64)
 
 
+class SchedulerTriggerRequest(BaseModel):
+    slot_label: str | None = Field(default=None, min_length=4, max_length=16)
+
+
 app = FastAPI(title="Clip Studio ES API", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
@@ -1139,6 +1143,37 @@ def _start_scheduled_daily_review_batch(slot_label: str, prepare_at: datetime, p
     return str(payload["batch_id"])
 
 
+def _resolve_scheduler_slot(slot_label: str | None = None) -> tuple[str, datetime, datetime]:
+    now = _local_now()
+    normalized = (slot_label or "").strip()
+    if normalized and normalized not in SCHEDULER_SLOT_TIMES:
+        raise HTTPException(status_code=400, detail="scheduler_slot_not_supported")
+
+    if not normalized:
+        future_candidates: list[tuple[datetime, str]] = []
+        for candidate in SCHEDULER_SLOT_TIMES:
+            hour_str, minute_str = candidate.split(":", 1)
+            publish_at = now.replace(hour=int(hour_str), minute=int(minute_str), second=0, microsecond=0)
+            if publish_at >= now:
+                future_candidates.append((publish_at, candidate))
+        if future_candidates:
+            publish_at, normalized = min(future_candidates, key=lambda row: row[0])
+        else:
+            normalized = SCHEDULER_SLOT_TIMES[0]
+            hour_str, minute_str = normalized.split(":", 1)
+            publish_at = (now + timedelta(days=1)).replace(
+                hour=int(hour_str), minute=int(minute_str), second=0, microsecond=0
+            )
+    else:
+        hour_str, minute_str = normalized.split(":", 1)
+        publish_at = now.replace(hour=int(hour_str), minute=int(minute_str), second=0, microsecond=0)
+        if publish_at < now:
+            publish_at = publish_at + timedelta(days=1)
+
+    prepare_at = publish_at - timedelta(minutes=SCHEDULER_PREP_MINUTES)
+    return normalized, prepare_at, publish_at
+
+
 def _daily_review_scheduler_loop() -> None:
     while True:
         try:
@@ -1735,6 +1770,37 @@ def health() -> dict[str, Any]:
 @app.get("/api/scheduler/status")
 def scheduler_status() -> dict[str, Any]:
     return {"ok": True, **_get_scheduler_status()}
+
+
+@app.post("/api/scheduler/trigger")
+def scheduler_trigger(req: SchedulerTriggerRequest | None = None) -> dict[str, Any]:
+    if not _telegram_enabled():
+        raise HTTPException(status_code=503, detail="telegram_not_configured")
+    slot_label, _prepare_at, publish_at = _resolve_scheduler_slot((req.slot_label if req else None))
+    now = _local_now()
+    payload = _enqueue_daily_review_batch(
+        DailyReviewBatchRequest(
+            mode=SCHEDULER_MODE,
+            per_channel_scan=SCHEDULER_PER_CHANNEL_SCAN,
+            max_results=SCHEDULER_MAX_RESULTS,
+            this_week_only=True,
+            min_source_duration=SCHEDULER_MIN_SOURCE_DURATION,
+            posts_per_day=1,
+            reserve_count=SCHEDULER_RESERVE_COUNT,
+            options_per_slot=SCHEDULER_OPTIONS_PER_SLOT,
+            duration=SCHEDULER_DURATION,
+            stride=SCHEDULER_STRIDE,
+            overlap_ratio=SCHEDULER_OVERLAP_RATIO,
+            language=SCHEDULER_LANGUAGE,
+        ),
+        source="scheduler_manual",
+        scheduled_slot=slot_label,
+        scheduled_prepare_time=now.isoformat(),
+        scheduled_publish_time=publish_at.isoformat(),
+    )
+    if publish_at.date() == now.date():
+        _scheduler_mark_triggered(now.date().isoformat(), slot_label, payload["batch_id"], publish_at.isoformat(), now.isoformat())
+    return {"ok": True, **_serialize_daily_batch(payload)}
 
 
 @app.get("/api/tiktok/connect/start")
