@@ -12,8 +12,12 @@ import unicodedata
 from pathlib import Path
 
 
+JSON_LOG_MODE = False
+
+
 def log(msg: str) -> None:
-    print(f"[tiktok-upload] {msg}")
+    target = sys.stderr if JSON_LOG_MODE else sys.stdout
+    print(f"[tiktok-upload] {msg}", file=target)
 
 
 PRIVACY_LABELS = {
@@ -312,7 +316,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    global JSON_LOG_MODE
     args = build_parser().parse_args()
+    JSON_LOG_MODE = bool(args.json)
     try:
         video = Path(args.video) if args.video else pick_latest_video(Path(args.latest_from))
         if not video.exists():
@@ -356,9 +362,13 @@ def main() -> int:
         return 0
     except KeyboardInterrupt:
         log("Interrumpido por usuario.")
+        if args.json:
+            print(json.dumps({"ok": "false", "status": "interrupted", "error": "Interrumpido por usuario."}, ensure_ascii=False))
         return 130
     except Exception as exc:
         log(f"ERROR: {exc}")
+        if args.json:
+            print(json.dumps({"ok": "false", "status": "error", "error": str(exc)}, ensure_ascii=False))
         return 1
 
 

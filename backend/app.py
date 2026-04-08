@@ -18,10 +18,11 @@ import threading
 import traceback
 import uuid
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo
 
 import requests
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -105,9 +106,56 @@ TIKTOK_BROWSER_USE_SYSTEM_PROFILE = (
 TIKTOK_BROWSER_USER_DATA_DIR = os.getenv("TIKTOK_BROWSER_USER_DATA_DIR", "").strip()
 TIKTOK_BROWSER_PROFILE_DIRECTORY = os.getenv("TIKTOK_BROWSER_PROFILE_DIRECTORY", "Default").strip() or "Default"
 TIKTOK_BROWSER_TIMEOUT_SEC = int(os.getenv("TIKTOK_BROWSER_TIMEOUT_SEC", "900").strip() or "900")
+APP_TIMEZONE = os.getenv("APP_TIMEZONE", "Europe/Madrid").strip() or "Europe/Madrid"
+SCHEDULER_ENABLED = os.getenv("DAILY_REVIEW_SCHEDULER_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
+SCHEDULER_SLOT_TIMES_RAW = os.getenv("DAILY_REVIEW_SLOT_TIMES", "13:30,18:30,21:30,23:00").strip()
+SCHEDULER_PREP_MINUTES = int(os.getenv("DAILY_REVIEW_PREP_MINUTES", "20").strip() or "20")
+SCHEDULER_PER_CHANNEL_SCAN = int(os.getenv("DAILY_REVIEW_PER_CHANNEL_SCAN", "12").strip() or "12")
+SCHEDULER_MAX_RESULTS = int(os.getenv("DAILY_REVIEW_MAX_RESULTS", "18").strip() or "18")
+SCHEDULER_MIN_SOURCE_DURATION = int(os.getenv("DAILY_REVIEW_MIN_SOURCE_DURATION", "90").strip() or "90")
+SCHEDULER_RESERVE_COUNT = int(os.getenv("DAILY_REVIEW_RESERVE_COUNT", "2").strip() or "2")
+SCHEDULER_DURATION = int(os.getenv("DAILY_REVIEW_DURATION", "60").strip() or "60")
+SCHEDULER_STRIDE = int(os.getenv("DAILY_REVIEW_STRIDE", "10").strip() or "10")
+SCHEDULER_OVERLAP_RATIO = float(os.getenv("DAILY_REVIEW_OVERLAP_RATIO", "0.40").strip() or "0.40")
+SCHEDULER_OPTIONS_PER_SLOT = int(os.getenv("DAILY_REVIEW_OPTIONS_PER_SLOT", "3").strip() or "3")
+SCHEDULER_LANGUAGE = os.getenv("DAILY_REVIEW_LANGUAGE", "es").strip() or "es"
+SCHEDULER_MODE = os.getenv("DAILY_REVIEW_MODE", "creators_es").strip() or "creators_es"
+SCHEDULER_STATE_FILE = WORK_DIR / "daily_review_scheduler_state.json"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 WORK_DIR.mkdir(parents=True, exist_ok=True)
 TIKTOK_VERIFICATION_DIR.mkdir(parents=True, exist_ok=True)
+
+try:
+    LOCAL_TZ = ZoneInfo(APP_TIMEZONE)
+except Exception:
+    LOCAL_TZ = ZoneInfo("Europe/Madrid")
+
+
+def _parse_scheduler_slot_times(raw: str) -> list[str]:
+    parsed: list[tuple[int, str]] = []
+    seen: set[str] = set()
+    for part in (raw or "").split(","):
+        value = part.strip()
+        if not value:
+            continue
+        try:
+            hour_str, minute_str = value.split(":", 1)
+            hour = int(hour_str)
+            minute = int(minute_str)
+        except Exception:
+            continue
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            continue
+        normalized = f"{hour:02d}:{minute:02d}"
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        parsed.append((hour * 60 + minute, normalized))
+    parsed.sort(key=lambda row: row[0])
+    return [value for _, value in parsed]
+
+
+SCHEDULER_SLOT_TIMES = _parse_scheduler_slot_times(SCHEDULER_SLOT_TIMES_RAW) or ["13:30", "18:30", "21:30", "23:00"]
 
 
 def _cookie_file_is_usable(path: str) -> bool:
@@ -228,11 +276,85 @@ _tiktok_oauth_states: dict[str, dict[str, Any]] = {}
 _telegram_session = requests.Session()
 _telegram_poller_started = False
 _telegram_update_offset = 0
+_scheduler_lock = threading.Lock()
+_scheduler_thread_started = False
+_scheduler_state: dict[str, Any] = {
+    "date": "",
+    "triggered": {},
+    "last_check": None,
+    "last_error": None,
+    "next_trigger_at": None,
+    "last_batch_id": None,
+}
+
+
+def _local_now() -> datetime:
+    return datetime.now(LOCAL_TZ)
+
+
+def _load_scheduler_state() -> None:
+    global _scheduler_state
+    state = {
+        "date": "",
+        "triggered": {},
+        "last_check": None,
+        "last_error": None,
+        "next_trigger_at": None,
+        "last_batch_id": None,
+    }
+    try:
+        if SCHEDULER_STATE_FILE.exists():
+            payload = json.loads(SCHEDULER_STATE_FILE.read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                state.update(payload)
+                if not isinstance(state.get("triggered"), dict):
+                    state["triggered"] = {}
+    except Exception as exc:
+        state["last_error"] = f"state_load_failed: {exc}"
+    with _scheduler_lock:
+        _scheduler_state = state
+
+
+def _save_scheduler_state() -> None:
+    with _scheduler_lock:
+        payload = dict(_scheduler_state)
+    try:
+        SCHEDULER_STATE_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _scheduler_window_for(day: datetime, slot_label: str) -> dict[str, str]:
+    hour_str, minute_str = slot_label.split(":", 1)
+    publish_at = day.replace(hour=int(hour_str), minute=int(minute_str), second=0, microsecond=0)
+    prepare_at = publish_at - timedelta(minutes=SCHEDULER_PREP_MINUTES)
+    return {
+        "slot_label": slot_label,
+        "prepare_at": prepare_at.isoformat(),
+        "publish_at": publish_at.isoformat(),
+    }
+
+
+def _get_scheduler_status() -> dict[str, Any]:
+    now = _local_now()
+    with _scheduler_lock:
+        state = dict(_scheduler_state)
+    return {
+        "enabled": SCHEDULER_ENABLED,
+        "timezone": APP_TIMEZONE,
+        "slot_times": list(SCHEDULER_SLOT_TIMES),
+        "prep_minutes": SCHEDULER_PREP_MINUTES,
+        "now_local": now.isoformat(),
+        "state": state,
+        "windows_today": [_scheduler_window_for(now, slot) for slot in SCHEDULER_SLOT_TIMES],
+    }
 
 
 @app.on_event("startup")
 def _startup_tasks() -> None:
+    _load_scheduler_state()
     _ensure_telegram_poller_started()
+    _ensure_daily_review_scheduler_started()
 
 
 def _safe_rel_to_output(file_path: str) -> str | None:
@@ -412,6 +534,37 @@ def _should_try_browser_fallback(exc: Exception) -> bool:
     )
 
 
+def _extract_browser_fallback_result(stdout: str) -> dict[str, Any]:
+    raw = (stdout or "").strip()
+    if not raw:
+        return {}
+    for line in reversed(raw.splitlines()):
+        candidate = line.strip()
+        if not candidate.startswith("{"):
+            continue
+        try:
+            parsed = json.loads(candidate)
+        except Exception:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return {}
+
+
+def _clean_browser_fallback_stderr(stderr: str) -> str:
+    lines = []
+    for line in (stderr or "").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if "[DEP0169]" in stripped:
+            continue
+        if "Use `node --trace-deprecation" in stripped:
+            continue
+        lines.append(stripped)
+    return "\n".join(lines).strip()
+
+
 def _run_tiktok_browser_fallback(video_path: Path, caption: str, privacy_level: str) -> dict[str, Any]:
     script = SCRIPTS_DIR / "upload_to_tiktok.py"
     if not script.exists():
@@ -447,21 +600,30 @@ def _run_tiktok_browser_fallback(video_path: Path, caption: str, privacy_level: 
     if TIKTOK_BROWSER_PROFILE_DIRECTORY:
         cmd.extend(["--chrome-profile-directory", TIKTOK_BROWSER_PROFILE_DIRECTORY])
 
+    env = os.environ.copy()
+    env.setdefault("NODE_NO_WARNINGS", "1")
     proc = subprocess.run(
         cmd,
         cwd=str(REPO_ROOT),
         capture_output=True,
         text=True,
         timeout=TIKTOK_BROWSER_TIMEOUT_SEC,
+        env=env,
     )
     stdout = (proc.stdout or "").strip()
-    stderr = (proc.stderr or "").strip()
+    stderr = _clean_browser_fallback_stderr(proc.stderr or "")
+    result = _extract_browser_fallback_result(stdout)
     if proc.returncode != 0:
-        detail = stderr or stdout or f"codigo {proc.returncode}"
+        detail = (
+            str(result.get("error") or "").strip()
+            or str(result.get("status") or "").strip()
+            or stderr
+            or stdout
+            or f"codigo {proc.returncode}"
+        )
         raise RuntimeError(f"Browser fallback fallo: {detail[:1200]}")
 
-    result: dict[str, Any] = {}
-    if stdout:
+    if not result and stdout:
         last_line = stdout.splitlines()[-1].strip()
         try:
             result = json.loads(last_line)
@@ -856,6 +1018,10 @@ def _serialize_daily_batch(batch: dict[str, Any]) -> dict[str, Any]:
         "status": batch["status"],
         "created_at": batch["created_at"],
         "updated_at": batch["updated_at"],
+        "source": batch.get("source"),
+        "scheduled_slot": batch.get("scheduled_slot"),
+        "scheduled_prepare_time": batch.get("scheduled_prepare_time"),
+        "scheduled_publish_time": batch.get("scheduled_publish_time"),
         "mode": batch.get("mode"),
         "posts_per_day": batch.get("posts_per_day"),
         "reserve_count": batch.get("reserve_count"),
@@ -881,6 +1047,152 @@ def _clear_publish_reply_markup_for_request(req: dict[str, Any]) -> None:
         _telegram_call("editMessageReplyMarkup", data=data, timeout=60)
     except HTTPException:
         pass
+
+
+def _enqueue_daily_review_batch(
+    req: DailyReviewBatchRequest,
+    *,
+    source: str = "manual",
+    scheduled_slot: str | None = None,
+    scheduled_prepare_time: str | None = None,
+    scheduled_publish_time: str | None = None,
+) -> dict[str, Any]:
+    batch_id = uuid.uuid4().hex[:24]
+    payload = {
+        "batch_id": batch_id,
+        "status": "queued",
+        "created_at": _utc_now_iso(),
+        "updated_at": _utc_now_iso(),
+        "source": source,
+        "scheduled_slot": scheduled_slot,
+        "scheduled_prepare_time": scheduled_prepare_time,
+        "scheduled_publish_time": scheduled_publish_time,
+        "mode": req.mode,
+        "posts_per_day": req.posts_per_day,
+        "reserve_count": req.reserve_count,
+        "options_per_slot": req.options_per_slot,
+        "notes": None,
+        "plan": None,
+        "items": [],
+        "logs": ["Preparando batch diario de revisiones..."],
+        "error": None,
+    }
+    with _daily_batches_lock:
+        _daily_review_batches[batch_id] = payload
+    threading.Thread(target=_run_daily_review_batch, args=(batch_id, req), daemon=True).start()
+    return payload
+
+
+def _scheduler_mark_triggered(date_key: str, slot_label: str, batch_id: str, publish_at: str, prepare_at: str) -> None:
+    with _scheduler_lock:
+        if _scheduler_state.get("date") != date_key:
+            _scheduler_state["date"] = date_key
+            _scheduler_state["triggered"] = {}
+        triggered = _scheduler_state.setdefault("triggered", {})
+        triggered[slot_label] = {
+            "batch_id": batch_id,
+            "publish_at": publish_at,
+            "prepare_at": prepare_at,
+            "triggered_at": _local_now().isoformat(),
+        }
+        _scheduler_state["last_batch_id"] = batch_id
+        _scheduler_state["last_error"] = None
+    _save_scheduler_state()
+
+
+def _scheduler_set_last_error(message: str | None) -> None:
+    with _scheduler_lock:
+        _scheduler_state["last_error"] = message
+        _scheduler_state["last_check"] = _local_now().isoformat()
+    _save_scheduler_state()
+
+
+def _scheduler_set_next_trigger(next_trigger_at: str | None) -> None:
+    with _scheduler_lock:
+        _scheduler_state["next_trigger_at"] = next_trigger_at
+        _scheduler_state["last_check"] = _local_now().isoformat()
+    _save_scheduler_state()
+
+
+def _start_scheduled_daily_review_batch(slot_label: str, prepare_at: datetime, publish_at: datetime) -> str:
+    req = DailyReviewBatchRequest(
+        mode=SCHEDULER_MODE,
+        per_channel_scan=SCHEDULER_PER_CHANNEL_SCAN,
+        max_results=SCHEDULER_MAX_RESULTS,
+        this_week_only=True,
+        min_source_duration=SCHEDULER_MIN_SOURCE_DURATION,
+        posts_per_day=1,
+        reserve_count=SCHEDULER_RESERVE_COUNT,
+        options_per_slot=SCHEDULER_OPTIONS_PER_SLOT,
+        duration=SCHEDULER_DURATION,
+        stride=SCHEDULER_STRIDE,
+        overlap_ratio=SCHEDULER_OVERLAP_RATIO,
+        language=SCHEDULER_LANGUAGE,
+    )
+    payload = _enqueue_daily_review_batch(
+        req,
+        source="scheduler",
+        scheduled_slot=slot_label,
+        scheduled_prepare_time=prepare_at.isoformat(),
+        scheduled_publish_time=publish_at.isoformat(),
+    )
+    return str(payload["batch_id"])
+
+
+def _daily_review_scheduler_loop() -> None:
+    while True:
+        try:
+            if not (SCHEDULER_ENABLED and _telegram_enabled()):
+                _scheduler_set_next_trigger(None)
+                threading.Event().wait(30)
+                continue
+
+            now = _local_now()
+            date_key = now.date().isoformat()
+            with _scheduler_lock:
+                if _scheduler_state.get("date") != date_key:
+                    _scheduler_state["date"] = date_key
+                    _scheduler_state["triggered"] = {}
+                triggered_today = dict(_scheduler_state.get("triggered") or {})
+
+            next_trigger_at: str | None = None
+            for slot_label in SCHEDULER_SLOT_TIMES:
+                hour_str, minute_str = slot_label.split(":", 1)
+                publish_at = now.replace(hour=int(hour_str), minute=int(minute_str), second=0, microsecond=0)
+                prepare_at = publish_at - timedelta(minutes=SCHEDULER_PREP_MINUTES)
+                if next_trigger_at is None and now <= prepare_at:
+                    next_trigger_at = prepare_at.isoformat()
+                if slot_label in triggered_today:
+                    continue
+                latest_useful = publish_at - timedelta(minutes=1)
+                if prepare_at <= now <= latest_useful:
+                    batch_id = _start_scheduled_daily_review_batch(slot_label, prepare_at, publish_at)
+                    _scheduler_mark_triggered(date_key, slot_label, batch_id, publish_at.isoformat(), prepare_at.isoformat())
+                    triggered_today[slot_label] = {"batch_id": batch_id}
+                    next_trigger_at = None
+
+            if next_trigger_at is None:
+                future_prepares = []
+                for slot_label in SCHEDULER_SLOT_TIMES:
+                    hour_str, minute_str = slot_label.split(":", 1)
+                    publish_at = now.replace(hour=int(hour_str), minute=int(minute_str), second=0, microsecond=0)
+                    prepare_at = publish_at - timedelta(minutes=SCHEDULER_PREP_MINUTES)
+                    if now <= prepare_at:
+                        future_prepares.append(prepare_at)
+                if future_prepares:
+                    next_trigger_at = min(future_prepares).isoformat()
+            _scheduler_set_next_trigger(next_trigger_at)
+        except Exception as exc:
+            _scheduler_set_last_error(str(exc))
+        threading.Event().wait(20)
+
+
+def _ensure_daily_review_scheduler_started() -> None:
+    global _scheduler_thread_started
+    if _scheduler_thread_started or not SCHEDULER_ENABLED:
+        return
+    _scheduler_thread_started = True
+    threading.Thread(target=_daily_review_scheduler_loop, daemon=True).start()
 
 
 def _run_daily_review_batch(batch_id: str, req: DailyReviewBatchRequest) -> None:
@@ -1393,6 +1705,7 @@ def _run_job(job_id: str, req: CreateJobRequest) -> None:
 
 @app.get("/api/health")
 def health() -> dict[str, Any]:
+    scheduler = _get_scheduler_status()
     return {
         "ok": True,
         "service": "clip-studio-es-api",
@@ -1411,7 +1724,17 @@ def health() -> dict[str, Any]:
         "tiktok_ready": _tiktok_enabled(),
         "tiktok_browser_fallback_enabled": TIKTOK_BROWSER_FALLBACK_ENABLED,
         "tiktok_browser_connect_cdp": bool(TIKTOK_BROWSER_CONNECT_CDP),
+        "scheduler_enabled": scheduler["enabled"],
+        "scheduler_slot_times": scheduler["slot_times"],
+        "scheduler_prep_minutes": scheduler["prep_minutes"],
+        "scheduler_next_trigger_at": scheduler["state"].get("next_trigger_at"),
+        "scheduler_last_error": scheduler["state"].get("last_error"),
     }
+
+
+@app.get("/api/scheduler/status")
+def scheduler_status() -> dict[str, Any]:
+    return {"ok": True, **_get_scheduler_status()}
 
 
 @app.get("/api/tiktok/connect/start")
@@ -1575,26 +1898,7 @@ def daily_plan(req: DailyPlanRequest) -> dict[str, Any]:
 def create_daily_review_batch(req: DailyReviewBatchRequest) -> dict[str, Any]:
     if not _telegram_enabled():
         raise HTTPException(status_code=503, detail="telegram_not_configured")
-    batch_id = uuid.uuid4().hex[:24]
-    payload = {
-        "batch_id": batch_id,
-        "status": "queued",
-        "created_at": _utc_now_iso(),
-        "updated_at": _utc_now_iso(),
-        "mode": req.mode,
-        "posts_per_day": req.posts_per_day,
-        "reserve_count": req.reserve_count,
-        "options_per_slot": req.options_per_slot,
-        "notes": None,
-        "plan": None,
-        "items": [],
-        "logs": ["Preparando batch diario de revisiones..."],
-        "error": None,
-    }
-    with _daily_batches_lock:
-        _daily_review_batches[batch_id] = payload
-    thread = threading.Thread(target=_run_daily_review_batch, args=(batch_id, req), daemon=True)
-    thread.start()
+    payload = _enqueue_daily_review_batch(req, source="manual")
     return {"ok": True, **_serialize_daily_batch(payload)}
 
 
