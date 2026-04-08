@@ -405,6 +405,20 @@ def _build_caption_cta(signal_tags: List[str], hook: str, why_it_may_work: str) 
     return "Quédate hasta el giro final."
 
 
+def _source_channel_line(source_channel: str, title: str) -> str:
+    channel = _clean_social_text(source_channel, allow_punctuation=False).strip()
+    if not channel:
+        return ""
+    norm_channel = _norm_text(channel)
+    norm_title = _norm_text(title)
+    if norm_channel and norm_channel in norm_title:
+        return ""
+    blocked = ("records", "official", "studios", "topic", "trailers", "pictures", "music")
+    if any(token in channel.lower() for token in blocked):
+        return ""
+    return f"Visto en {channel}."
+
+
 def build_tiktok_copy(
     *,
     source_title: str,
@@ -441,8 +455,9 @@ def build_tiktok_copy(
     cta_line = _build_caption_cta(signal_tags, hook, why_it_may_work)
     if cta_line and _norm_text(cta_line) not in _norm_text(" ".join(caption_parts)):
         caption_parts.append(cta_line)
-    if source_channel and _norm_text(source_channel) not in _norm_text(" ".join(caption_parts)):
-        caption_parts.append(f"Clip de {source_channel}.")
+    source_line = _source_channel_line(source_channel, title)
+    if source_line and _norm_text(source_line) not in _norm_text(" ".join(caption_parts)):
+        caption_parts.append(source_line)
     caption = ""
     for idx, part in enumerate(part.strip() for part in caption_parts if part):
         if not caption:

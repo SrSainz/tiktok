@@ -523,6 +523,36 @@ def build_hook_ass_markup(hook_text: str) -> str:
     return r"{\1c&H0034FF3C&}" + ass_escape(lines[0]) + r"{\r}\N" + ass_escape(lines[1])
 
 
+def build_caption_ass_markup(chunk: str) -> str:
+    parts = [part for part in chunk.split(r"\N") if part]
+    if not parts:
+        return ass_escape(chunk)
+
+    rendered_lines: List[str] = []
+    highlight_used = False
+    for part in parts:
+        words = part.split()
+        if not words:
+            continue
+        highlight_index = 0
+        for idx, word in enumerate(words):
+            raw = re.sub(r"[^A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9]", "", word, flags=re.UNICODE)
+            if raw and (any(ch.isdigit() for ch in raw) or raw.upper() not in HOOK_STOPWORDS):
+                highlight_index = idx
+                break
+        highlighted: List[str] = []
+        for idx, word in enumerate(words):
+            escaped = ass_escape(word)
+            if not highlight_used and idx == highlight_index:
+                highlighted.append(r"{\1c&H0034FF3C&}" + escaped + r"{\r}")
+                highlight_used = True
+            else:
+                highlighted.append(escaped)
+        rendered_lines.append(" ".join(highlighted))
+
+    return r"\N".join(rendered_lines) if rendered_lines else ass_escape(chunk)
+
+
 def chunks_too_similar(a: str, b: str) -> bool:
     a_words = set(re.findall(r"\w+", a.lower(), flags=re.UNICODE))
     b_words = set(re.findall(r"\w+", b.lower(), flags=re.UNICODE))
@@ -589,7 +619,7 @@ def write_segment_ass(cues: List[CaptionCue], start: float, end: float, out_path
 
             events.append(
                 "Dialogue: 0,"
-                f"{fmt_ass(part_start)},{fmt_ass(part_end)},Cap,,0,0,0,,{ass_escape(chunk)}"
+                f"{fmt_ass(part_start)},{fmt_ass(part_end)},Cap,,0,0,0,,{build_caption_ass_markup(chunk)}"
             )
             recent_chunks.append(chunk_norm)
             recent_chunks = recent_chunks[-4:]
