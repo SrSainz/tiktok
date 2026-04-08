@@ -89,7 +89,7 @@ TIKTOK_CLIENT_KEY = os.getenv("TIKTOK_CLIENT_KEY", "").strip()
 TIKTOK_CLIENT_SECRET = os.getenv("TIKTOK_CLIENT_SECRET", "").strip()
 TIKTOK_REDIRECT_URI = os.getenv("TIKTOK_REDIRECT_URI", "http://127.0.0.1:8765/callback/").strip()
 TIKTOK_TOKENS_FILE = os.getenv("TIKTOK_TOKENS_FILE", str(REPO_ROOT / ".tiktok_tokens.json")).strip()
-TIKTOK_DEFAULT_PRIVACY = os.getenv("TIKTOK_DEFAULT_PRIVACY", "SELF_ONLY").strip() or "SELF_ONLY"
+TIKTOK_DEFAULT_PRIVACY = os.getenv("TIKTOK_DEFAULT_PRIVACY", "PUBLIC_TO_EVERYONE").strip() or "PUBLIC_TO_EVERYONE"
 TIKTOK_EXPECTED_USERNAME = os.getenv("TIKTOK_EXPECTED_USERNAME", "").strip().lstrip("@").lower()
 TIKTOK_BROWSER_FALLBACK_ENABLED = (
     os.getenv("TIKTOK_BROWSER_FALLBACK_ENABLED", "0").strip().lower() not in {"0", "false", "no", "off", ""}
