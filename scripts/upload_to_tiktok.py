@@ -152,6 +152,51 @@ def _pick_existing_upload_page(context):
     return candidates[0][1]
 
 
+def _find_first_button(page, names):
+    for name in names:
+        try:
+            button = page.get_by_role("button", name=name).first
+            if button.count() > 0:
+                return button
+        except Exception:
+            continue
+    return None
+
+
+def _set_video_file(page, video_path: Path) -> str:
+    selectors = ["input[type='file']", "input[accept*='video']", "input[data-e2e*='upload']"]
+    for sel in selectors:
+        try:
+            locator = page.locator(sel).first
+            if locator.count() > 0:
+                locator.set_input_files(str(video_path), timeout=15000)
+                return f"input:{sel}"
+            page.wait_for_selector(sel, timeout=3000, state="attached")
+            page.locator(sel).first.set_input_files(str(video_path), timeout=15000)
+            return f"input:{sel}"
+        except Exception:
+            continue
+
+    upload_buttons = [
+        "Sustituir",
+        re.compile(r"Seleccionar v[ií]deo", re.I),
+        re.compile(r"Seleccionar video", re.I),
+        re.compile(r"Upload", re.I),
+        re.compile(r"Cargar", re.I),
+    ]
+    button = _find_first_button(page, upload_buttons)
+    if button is None:
+        raise RuntimeError("BROWSER_FILE_INPUT_NOT_FOUND")
+
+    try:
+        with page.expect_file_chooser(timeout=10000) as chooser_info:
+            button.click(timeout=10000, force=True)
+        chooser_info.value.set_files(str(video_path))
+        return "file_chooser_button"
+    except Exception as exc:
+        raise RuntimeError(f"BROWSER_FILE_INPUT_NOT_FOUND: {exc}") from exc
+
+
 def pick_latest_video(output_dir: Path) -> Path:
     files = sorted(output_dir.glob("*.mp4"), key=lambda p: p.stat().st_mtime, reverse=True)
     if not files:
@@ -224,27 +269,14 @@ def upload(
             log("Reutilizando pestaña existente de TikTok Studio.")
             page.bring_to_front()
 
-        file_selector = None
-        selectors = ["input[type='file']", "input[accept*='video']", "input[data-e2e*='upload']"]
-        for sel in selectors:
-            try:
-                locator = page.locator(sel).first
-                if locator.count() > 0:
-                    file_selector = sel
-                    break
-                page.wait_for_selector(sel, timeout=35000, state="attached")
-                file_selector = sel
-                break
-            except Exception:
-                continue
-
-        if not file_selector:
-            log("No se detecto input de carga. Puede ser bloqueo/login. Te dejo el navegador abierto para hacerlo manual.")
+        try:
+            upload_method = _set_video_file(page, video_path)
+        except RuntimeError as exc:
+            log(f"No se detecto input de carga util. Puede ser bloqueo/login. Te dejo el navegador abierto para hacerlo manual. Motivo: {exc}")
             page.wait_for_timeout(manual_wait * 1000)
-            return {"ok": "false", "status": "file_input_not_found"}
+            return {"ok": "false", "status": str(exc)}
 
-        page.set_input_files(file_selector, str(video_path))
-        log(f"Video cargado: {video_path.name}")
+        log(f"Video cargado ({upload_method}): {video_path.name}")
         page.wait_for_timeout(1500)
 
         if caption:
