@@ -22,7 +22,7 @@ $args = @(
   "--remote-debugging-address=0.0.0.0"
   "--remote-debugging-port=9222"
   "--profile-directory=Default"
-  "https://www.tiktok.com/upload?lang=es"
+  "https://www.tiktok.com/tiktokstudio/upload?lang=es"
 )
 
 Start-Process -FilePath $brave -ArgumentList $args | Out-Null
