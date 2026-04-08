@@ -1097,6 +1097,104 @@ def locate_subtitle(info: dict, job_dir: Path, preferred_lang: str) -> Optional[
     return candidates[0]
 
 
+def locate_brand_outro() -> Optional[Path]:
+    configured = os.getenv("BRAND_OUTRO_FILE", "").strip()
+    candidates: List[Path] = []
+    if configured:
+        candidates.append(Path(configured))
+    project_root = Path(__file__).resolve().parents[1]
+    candidates.append(project_root / "outro.mp4")
+    for candidate in candidates:
+        try:
+            resolved = candidate.expanduser().resolve()
+        except Exception:
+            resolved = candidate.expanduser()
+        if resolved.exists() and resolved.is_file():
+            return resolved
+    return None
+
+
+def finalize_clip_with_outro(
+    ffmpeg_bin: str,
+    main_clip: Path,
+    output_video: Path,
+    outro_video: Optional[Path],
+) -> None:
+    if not outro_video or not outro_video.exists():
+        if main_clip != output_video:
+            if output_video.exists():
+                output_video.unlink()
+            main_clip.replace(output_video)
+        return
+
+    cmd = [
+        ffmpeg_bin,
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        str(main_clip.name),
+        "-i",
+        str(outro_video),
+        "-filter_complex",
+        ";".join(
+            [
+                "[0:v]scale=1080:1920,setsar=1,format=yuv420p,fps=30[v0]",
+                "[1:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=22:12[obg]",
+                "[1:v]scale=1080:1920:force_original_aspect_ratio=decrease,setsar=1,eq=contrast=1.03:saturation=1.05[ofg]",
+                "[obg][ofg]overlay=(W-w)/2:(H-h)/2,setsar=1,format=yuv420p,fps=30,fade=t=in:st=0:d=0.12[v1]",
+                "[0:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a0]",
+                "[1:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,afade=t=in:st=0:d=0.06[a1]",
+                "[v0][a0][v1][a1]concat=n=2:v=1:a=1[v][a]",
+            ]
+        ),
+        "-map",
+        "[v]",
+        "-map",
+        "[a]",
+        "-r",
+        "30",
+        "-c:v",
+        "libx264",
+        "-profile:v",
+        "high",
+        "-level:v",
+        "4.1",
+        "-preset",
+        "superfast",
+        "-crf",
+        "23",
+        "-maxrate",
+        "4500k",
+        "-bufsize",
+        "9000k",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-ar",
+        "48000",
+        "-b:a",
+        "128k",
+        "-movflags",
+        "+faststart",
+        str(output_video.name),
+    ]
+    proc = subprocess.run(cmd, cwd=main_clip.parent, capture_output=True, text=True)
+    if proc.returncode == 0:
+        try:
+            main_clip.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return
+
+    log(f"No se pudo añadir outro de marca; se mantiene el clip base. Detalle: {(proc.stderr or '')[-300:]}")
+    if output_video.exists():
+        output_video.unlink()
+    main_clip.replace(output_video)
+
+
 def download_source_video(candidate: VideoCandidate, job_dir: Path, language: str) -> tuple[Path, Optional[Path], dict]:
     ffmpeg_bin = imageio_ffmpeg.get_ffmpeg_exe()
     ydl_opts = _apply_yt_auth_opts({
@@ -1172,6 +1270,12 @@ def render_short(
     subtitle_ass: Path | None = None,
     include_hook_overlay: bool = False,
 ) -> None:
+    branded_outro = locate_brand_outro()
+    main_output = output_video.with_name(f"{output_video.stem}.main{output_video.suffix}")
+    if main_output.exists():
+        main_output.unlink()
+    if output_video.exists():
+        output_video.unlink()
     clip_duration = max(0.15, segment.end - segment.start)
     fade_out_start = max(0.0, clip_duration - 0.16)
     intro_transition = (
@@ -1254,11 +1358,12 @@ def render_short(
         "128k",
         "-movflags",
         "+faststart",
-        str(output_video.name),
+        str(main_output.name),
     ]
 
     proc = subprocess.run(cmd, cwd=input_video.parent, capture_output=True, text=True)
     if proc.returncode == 0:
+        finalize_clip_with_outro(ffmpeg_bin, main_output, output_video, branded_outro)
         return
 
     # Fallback for constrained hosts (Railway-like): lower resolution + lighter encode.
@@ -1330,15 +1435,20 @@ def render_short(
         "128k",
         "-movflags",
         "+faststart",
-        str(output_video.name),
+        str(main_output.name),
     ]
     proc_fb = subprocess.run(fallback_cmd, cwd=input_video.parent, capture_output=True, text=True)
     if proc_fb.returncode != 0:
+        try:
+            main_output.unlink(missing_ok=True)
+        except Exception:
+            pass
         raise RuntimeError(
             "ffmpeg fallo (modo normal + fallback):\n"
             f"-- normal rc={proc.returncode} --\n{(proc.stderr or '')[-1800:]}\n"
             f"-- fallback rc={proc_fb.returncode} --\n{(proc_fb.stderr or '')[-1800:]}"
         )
+    finalize_clip_with_outro(ffmpeg_bin, main_output, output_video, branded_outro)
 
 
 def upload_to_tiktok_playwright(
