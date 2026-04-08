@@ -36,7 +36,7 @@ SCRIPTS_DIR = REPO_ROOT / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from clip_dashboard import DashboardConfig, discover_creator_videos, generate_dashboard  # noqa: E402
+from clip_dashboard import DashboardConfig, build_daily_post_plan, discover_creator_videos, generate_dashboard  # noqa: E402
 from tiktok_direct_post_api import (  # noqa: E402
     TikTokApiError,
     TikTokDesktopOAuth,
@@ -165,6 +165,17 @@ class DiscoverRequest(BaseModel):
     min_source_duration: int = Field(default=90, ge=30, le=3600)
 
 
+class DailyPlanRequest(BaseModel):
+    mode: str = Field(default="creators_es", min_length=4, max_length=32)
+    channels: list[str] | None = None
+    per_channel_scan: int = Field(default=12, ge=5, le=50)
+    this_week_only: bool = True
+    max_results: int = Field(default=18, ge=4, le=50)
+    min_source_duration: int = Field(default=90, ge=30, le=3600)
+    posts_per_day: int = Field(default=4, ge=1, le=4)
+    reserve_count: int = Field(default=2, ge=0, le=4)
+
+
 class CreateJobRequest(BaseModel):
     url: str = Field(min_length=8, max_length=500)
     duration: int = Field(default=60, ge=20, le=90)
@@ -240,6 +251,21 @@ def _serialize_candidate(c: Any) -> dict[str, Any]:
         "views_per_day": float(c.views_per_day or 0.0),
         "ai_score": float(c.ai_score or 0.0),
         "ai_reason": c.ai_reason or "",
+    }
+
+
+def _serialize_plan_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    candidate = entry.get("candidate")
+    return {
+        "slot_key": entry.get("slot_key"),
+        "slot_label": entry.get("slot_label"),
+        "publish_time": entry.get("publish_time"),
+        "strategy": entry.get("strategy"),
+        "role": entry.get("role"),
+        "plan_score": entry.get("plan_score"),
+        "reason": entry.get("reason"),
+        "summary": entry.get("summary"),
+        "candidate": _serialize_candidate(candidate) if candidate else None,
     }
 
 
@@ -1149,6 +1175,33 @@ def discover(req: DiscoverRequest) -> dict[str, Any]:
         return {"items": [_serialize_candidate(c) for c in candidates]}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"discover_failed: {exc}") from exc
+
+
+@app.post("/api/plan/daily")
+def daily_plan(req: DailyPlanRequest) -> dict[str, Any]:
+    try:
+        plan = build_daily_post_plan(
+            mode=req.mode,
+            channels=req.channels,
+            per_channel_scan=req.per_channel_scan,
+            this_week_only=req.this_week_only,
+            min_source_duration=req.min_source_duration,
+            max_results=req.max_results,
+            posts_per_day=req.posts_per_day,
+            reserve_count=req.reserve_count,
+        )
+        return {
+            "date": plan.get("date"),
+            "timezone": plan.get("timezone"),
+            "mode": plan.get("mode"),
+            "posts_per_day": plan.get("posts_per_day"),
+            "reserve_count": plan.get("reserve_count"),
+            "notes": plan.get("notes"),
+            "slots": [_serialize_plan_entry(item) for item in plan.get("slots", [])],
+            "reserves": [_serialize_plan_entry(item) for item in plan.get("reserves", [])],
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"daily_plan_failed: {exc}") from exc
 
 
 @app.post("/api/jobs")

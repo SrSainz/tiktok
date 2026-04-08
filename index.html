@@ -150,6 +150,14 @@
         font-size: 12px;
         margin-top: 3px;
       }
+      .item .slot {
+        display: inline-block;
+        margin-bottom: 6px;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        color: #7ff4d4;
+      }
       .logs {
         margin-top: 12px;
         border: 1px solid var(--line);
@@ -370,17 +378,17 @@
     <main class="container">
       <section class="hero">
         <h1>Clip Studio ES Web</h1>
-        <div class="muted">Estilo Opus: descubre virales, genera opciones de clips y elige cuál subir.</div>
+        <div class="muted">Estilo Opus: descubre virales, genera opciones de clips y elige cual subir.</div>
       </section>
 
       <section class="grid">
         <aside class="panel">
-          <h2>Configuración</h2>
+          <h2>Configuracion</h2>
           <label for="backendUrl">Backend URL</label>
           <input id="backendUrl" placeholder="https://tu-backend.com o deja vacio si usas /studio en el mismo servidor" />
           <div class="row">
             <button class="btn secondary" id="saveBackendBtn">Guardar URL</button>
-            <button class="btn secondary" id="healthBtn">Probar conexión</button>
+            <button class="btn secondary" id="healthBtn">Probar conexion</button>
           </div>
           <div class="row">
             <button class="btn secondary" id="connectTikTokBtn">Conectar TikTok</button>
@@ -389,7 +397,7 @@
           <div id="healthStatus" class="status">Sin comprobar</div>
 
           <h2 style="margin-top: 14px">Descubrir virales</h2>
-          <div class="status">Charts oficiales de YouTube España. Puedes ver virales generales o solo creadores.</div>
+          <div class="status">Charts oficiales de YouTube Espana. Puedes ver virales generales o solo creadores.</div>
           <div style="margin-top: 10px">
             <label for="discoverMode">Modo descubrimiento</label>
             <select id="discoverMode">
@@ -403,7 +411,7 @@
               <input id="scanInput" type="number" min="5" max="50" value="12" />
             </div>
             <div>
-              <label for="limitInput">Límite</label>
+              <label for="limitInput">Limite</label>
               <input id="limitInput" type="number" min="1" max="50" value="12" />
             </div>
           </div>
@@ -414,6 +422,21 @@
           <button class="btn" id="discoverBtn" style="margin-top: 10px">Buscar virales</button>
           <div id="discoverStatus" class="status">Pulsa para cargar candidatos.</div>
           <div id="candidateList" class="list"></div>
+
+          <h2 style="margin-top: 14px">Plan del dia</h2>
+          <div class="row">
+            <div>
+              <label for="planPostsInput">Clips</label>
+              <input id="planPostsInput" type="number" min="1" max="4" value="4" />
+            </div>
+            <div>
+              <label for="planReserveInput">Reservas</label>
+              <input id="planReserveInput" type="number" min="0" max="4" value="2" />
+            </div>
+          </div>
+          <button class="btn secondary" id="planBtn" style="margin-top: 10px">Planificar hoy</button>
+          <div id="planStatus" class="status">Todavia no hay plan diario.</div>
+          <div id="planList" class="list"></div>
         </aside>
 
         <section class="panel">
@@ -422,11 +445,11 @@
           <input id="urlInput" placeholder="https://www.youtube.com/watch?v=..." />
           <div class="row">
             <div>
-              <label for="durationInput">Duración clip (s)</label>
+              <label for="durationInput">Duracion clip (s)</label>
               <input id="durationInput" type="number" min="20" max="90" value="60" />
             </div>
             <div>
-              <label for="optionsInput">Número de opciones</label>
+              <label for="optionsInput">Numero de opciones</label>
               <input id="optionsInput" type="number" min="1" max="12" value="6" />
             </div>
           </div>
@@ -445,7 +468,7 @@
           <div id="jobLogs" class="logs"></div>
 
           <h2 style="margin-top: 14px">Opciones generadas</h2>
-          <div id="resultMeta" class="muted" style="margin-bottom: 8px">Aún no hay resultados.</div>
+          <div id="resultMeta" class="muted" style="margin-bottom: 8px">Aun no hay resultados.</div>
           <div id="results" class="results"></div>
         </section>
       </section>
@@ -460,6 +483,7 @@
         backend: "",
         jobId: "",
         lastResult: null,
+        dailyPlan: null,
         logCursor: 0,
         pollTimer: null,
         pollFailures: 0,
@@ -475,7 +499,9 @@
         backendUrl: $("backendUrl"),
         healthStatus: $("healthStatus"),
         discoverStatus: $("discoverStatus"),
+        planStatus: $("planStatus"),
         candidateList: $("candidateList"),
+        planList: $("planList"),
         urlInput: $("urlInput"),
         jobStatus: $("jobStatus"),
         jobLogs: $("jobLogs"),
@@ -684,6 +710,38 @@
         });
       }
 
+      function renderDailyPlan(plan) {
+        state.dailyPlan = plan || null;
+        ui.planList.innerHTML = "";
+        const planned = Array.isArray(plan?.slots) ? plan.slots : [];
+        const reserves = Array.isArray(plan?.reserves) ? plan.reserves : [];
+        const rows = [...planned, ...reserves];
+        if (!rows.length) {
+          return;
+        }
+        rows.forEach((entry, idx) => {
+          const row = document.createElement("div");
+          row.className = "item";
+          const candidate = entry?.candidate || {};
+          const publishLabel = entry.publish_time ? `${entry.publish_time}` : "";
+          const role = entry.role === "reserve" ? "Reserva" : entry.slot_label || `Slot ${idx + 1}`;
+          const strategy = String(entry.strategy || "").trim();
+          row.innerHTML = `
+            <div class="slot">${escapeHtml(role)}${publishLabel ? ` | ${escapeHtml(publishLabel)}` : ""}</div>
+            <div class="title">${escapeHtml(candidate.title || "Sin titulo")}</div>
+            <div class="meta">${escapeHtml(candidate.channel || "Canal")} | score ${Number(entry.plan_score || 0).toFixed(1)}</div>
+            ${strategy ? `<div class="meta">${escapeHtml(strategy)}</div>` : ""}
+          `;
+          row.onclick = () => {
+            if (candidate.url) {
+              ui.urlInput.value = candidate.url;
+              setStatus(ui.jobStatus, `Video cargado desde el plan: ${candidate.title || candidate.url}`, false);
+            }
+          };
+          ui.planList.appendChild(row);
+        });
+      }
+
       async function discover() {
         try {
             setStatus(ui.discoverStatus, "Buscando videos...", false);
@@ -703,6 +761,32 @@
           setStatus(ui.discoverStatus, `Encontrados ${state.candidates.length} candidatos.`, false);
         } catch (err) {
           setStatus(ui.discoverStatus, `Error discovery: ${err.message}`, true);
+        }
+      }
+
+      async function createDailyPlan() {
+        try {
+          setStatus(ui.planStatus, "Construyendo plan diario...", false);
+          const payload = {
+            mode: $("discoverMode").value || "creators_es",
+            per_channel_scan: readNumberInput("scanInput", 12),
+            max_results: Math.max(12, readNumberInput("limitInput", 12)),
+            this_week_only: Boolean($("weekOnly").checked),
+            posts_per_day: readNumberInput("planPostsInput", 4),
+            reserve_count: readNumberInput("planReserveInput", 2)
+          };
+          const data = await api("/api/plan/daily", payload, 120000);
+          renderDailyPlan(data);
+          const slotCount = Array.isArray(data?.slots) ? data.slots.length : 0;
+          const reserveCount = Array.isArray(data?.reserves) ? data.reserves.length : 0;
+          const note = String(data?.notes || "").trim();
+          setStatus(
+            ui.planStatus,
+            `Plan listo: ${slotCount} clips + ${reserveCount} reservas.${note ? ` ${note}` : ""}`,
+            false
+          );
+        } catch (err) {
+          setStatus(ui.planStatus, `Error plan diario: ${err.message}`, true);
         }
       }
 
@@ -956,7 +1040,7 @@
       async function createJob() {
         const url = ui.urlInput.value.trim();
         if (!url || (!url.includes("youtube.com") && !url.includes("youtu.be"))) {
-          setStatus(ui.jobStatus, "Pega una URL válida de YouTube.", true);
+          setStatus(ui.jobStatus, "Pega una URL valida de YouTube.", true);
           return;
         }
         try {
@@ -1029,6 +1113,7 @@
       $("connectTikTokBtn").onclick = connectTikTok;
       $("checkTikTokBtn").onclick = checkTikTokAccount;
       $("discoverBtn").onclick = discover;
+      $("planBtn").onclick = createDailyPlan;
       $("generateBtn").onclick = createJob;
 
       (function init() {
@@ -1042,3 +1127,4 @@
     </script>
   </body>
 </html>
+
