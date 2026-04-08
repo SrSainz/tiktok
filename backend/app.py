@@ -1192,13 +1192,13 @@ def _daily_review_scheduler_loop() -> None:
 
             next_trigger_at: str | None = None
             for slot_label in SCHEDULER_SLOT_TIMES:
+                if slot_label in triggered_today:
+                    continue
                 hour_str, minute_str = slot_label.split(":", 1)
                 publish_at = now.replace(hour=int(hour_str), minute=int(minute_str), second=0, microsecond=0)
                 prepare_at = publish_at - timedelta(minutes=SCHEDULER_PREP_MINUTES)
                 if next_trigger_at is None and now <= prepare_at:
                     next_trigger_at = prepare_at.isoformat()
-                if slot_label in triggered_today:
-                    continue
                 latest_useful = publish_at - timedelta(minutes=1)
                 if prepare_at <= now <= latest_useful:
                     batch_id = _start_scheduled_daily_review_batch(slot_label, prepare_at, publish_at)
@@ -1209,6 +1209,8 @@ def _daily_review_scheduler_loop() -> None:
             if next_trigger_at is None:
                 future_prepares = []
                 for slot_label in SCHEDULER_SLOT_TIMES:
+                    if slot_label in triggered_today:
+                        continue
                     hour_str, minute_str = slot_label.split(":", 1)
                     publish_at = now.replace(hour=int(hour_str), minute=int(minute_str), second=0, microsecond=0)
                     prepare_at = publish_at - timedelta(minutes=SCHEDULER_PREP_MINUTES)
