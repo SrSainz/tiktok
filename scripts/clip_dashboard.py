@@ -30,6 +30,7 @@ from youtube_tiktok_pipeline import (
     discover_most_popular_es,
     download_source_video,
     enrich_candidates,
+    extract_hook_focus_text,
     is_within_last_days,
     discover_from_channels,
     discover_from_search,
@@ -38,6 +39,7 @@ from youtube_tiktok_pipeline import (
     render_short,
     score_text,
     slugify,
+    write_segment_ass,
 )
 
 DEFAULT_CREATOR_CHANNELS = [
@@ -215,30 +217,30 @@ AI_HOOK_TERMS = {
 }
 
 TOPIC_HASHTAG_RULES = [
-    (("minecraft", "creeper", "survival", "mod"), ["#minecraft", "#gaming", "#espanol"]),
-    (("roblox",), ["#roblox", "#gaming", "#espanol"]),
-    (("clash", "clash royale", "brawl", "brawl stars"), ["#gaming", "#mobilegaming", "#espanol"]),
-    (("fortnite",), ["#fortnite", "#gaming", "#espanol"]),
-    (("velada", "boxeo", "combate"), ["#boxeo", "#velada", "#espanol"]),
-    (("entrevista", "podcast", "charla"), ["#podcast", "#clip", "#espanol"]),
-    (("historia", "curiosidad", "dato"), ["#curiosidades", "#viral", "#espanol"]),
+    (("minecraft", "creeper", "survival", "mod"), ["#minecraft", "#gaming", "#clipenespanol"]),
+    (("roblox",), ["#roblox", "#gaming", "#clipenespanol"]),
+    (("clash", "clash royale", "brawl", "brawl stars"), ["#gaming", "#mobilegaming", "#clipenespanol"]),
+    (("fortnite",), ["#fortnite", "#gaming", "#clipenespanol"]),
+    (("velada", "boxeo", "combate"), ["#boxeo", "#velada", "#clipenespanol"]),
+    (("entrevista", "podcast", "charla"), ["#podcast", "#clips", "#clipenespanol"]),
+    (("historia", "curiosidad", "dato"), ["#curiosidades", "#datos", "#clipenespanol"]),
 ]
 
 
 SIGNAL_HASHTAG_RULES = {
     "Pregunta": ["#pregunta", "#debate"],
     "Dato": ["#dato", "#curiosidad"],
-    "Impacto": ["#impactante", "#momentazo"],
-    "Mucho texto": ["#storytime", "#clip"],
+    "Impacto": ["#momentazo", "#impactante"],
+    "Mucho texto": ["#storytime", "#clipenespanol"],
     "Audio alto": ["#reaccion", "#momentazo"],
-    "Audio estable": ["#clip", "#espanol"],
-    "Cambio escena": ["#viral", "#clip"],
-    "Ritmo visual": ["#satisfying", "#clip"],
-    "Buen audio": ["#audio", "#clip"],
-    "Momento claro": ["#parati", "#viral"],
+    "Audio estable": ["#clipenespanol"],
+    "Cambio escena": ["#momento", "#clipenespanol"],
+    "Ritmo visual": ["#satisfying", "#clipenespanol"],
+    "Buen audio": ["#audio", "#clipenespanol"],
+    "Momento claro": ["#clipenespanol"],
 }
 
-BASE_TIKTOK_HASHTAGS = ["#clips", "#viral", "#parati", "#espanol"]
+BASE_TIKTOK_HASHTAGS = ["#clipenespanol"]
 
 
 def _safe_age_days(upload_date: str | None, today: date) -> int | None:
@@ -352,45 +354,117 @@ def _build_topic_hashtags(*texts: str, signal_tags: List[str] | None = None) -> 
         slug = "#" + slugify(tag.lstrip("#"), max_len=24).replace("-", "")
         if slug != "#":
             clean_tags.append(slug.lower())
-    return _dedupe_keep_order(clean_tags)[:6]
+    return _dedupe_keep_order(clean_tags)[:4]
+
+
+def _strip_clip_prefix(text: str) -> str:
+    clean = _clean_social_text(text)
+    clean = re.sub(
+        r"^(curiosidad/pregunta|dato concreto|momento impactante|momento explicativo|momento entretenido)\s*:\s*",
+        "",
+        clean,
+        flags=re.IGNORECASE,
+    )
+    return clean.strip()
+
+
+def _sentence_case(text: str) -> str:
+    value = _strip_clip_prefix(text)
+    if not value:
+        return ""
+    return value[0].upper() + value[1:]
+
+
+def _channel_hashtag(source_channel: str) -> str:
+    if not source_channel:
+        return ""
+    clean = _clean_social_text(source_channel, allow_punctuation=False)
+    lowered = clean.lower()
+    blocked = ("records", "official", "studios", "topic", "trailers", "pictures", "music")
+    if any(token in lowered for token in blocked):
+        return ""
+    slug = "#" + slugify(clean, max_len=20).replace("-", "")
+    if slug == "#" or len(slug) < 4:
+        return ""
+    return slug.lower()
+
+
+def _build_caption_cta(signal_tags: List[str], hook: str, why_it_may_work: str) -> str:
+    hook_clean = _strip_clip_prefix(hook)
+    why_clean = _strip_clip_prefix(why_it_may_work)
+    if "Pregunta" in signal_tags:
+        return "¿Tú qué harías en esa situación?"
+    if "Dato" in signal_tags or re.search(r"\b\d+\b", hook_clean):
+        return "Lo fuerte llega en segundos."
+    if "Impacto" in signal_tags:
+        return "Tiene ese inicio que te obliga a seguir."
+    if why_clean:
+        why_clean = _truncate_copy(why_clean, 80)
+        if why_clean:
+            return why_clean[0].upper() + why_clean[1:]
+    return "Quédate hasta el giro final."
 
 
 def build_tiktok_copy(
     *,
     source_title: str,
+    source_channel: str = "",
     hook: str,
     short_description: str,
     why_it_may_work: str,
     transcript_preview: str,
     signal_tags: List[str],
 ) -> tuple[str, str, List[str]]:
-    clean_hook = _truncate_copy(hook, 72)
+    clean_hook = _truncate_copy(_strip_clip_prefix(hook), 72)
+    focus_title = _truncate_copy(
+        _strip_clip_prefix(extract_hook_focus_text(f"{short_description}. {transcript_preview}. {hook}")),
+        48,
+    )
     lead_candidates = [
-        _truncate_copy(short_description, 72),
-        _truncate_copy(transcript_preview, 72),
-        _truncate_copy(source_title, 72),
+        _truncate_copy(_strip_clip_prefix(short_description), 72),
+        _truncate_copy(_strip_clip_prefix(transcript_preview), 72),
+        _truncate_copy(_strip_clip_prefix(source_title), 72),
     ]
+    if focus_title and len(focus_title) >= 8:
+        lead_candidates.insert(0, focus_title)
     if clean_hook and not _looks_noisy_title(hook):
         lead_candidates.insert(0, clean_hook)
     title = next((candidate for candidate in lead_candidates if candidate and len(candidate) >= 12), "")
     if not title:
-        title = _truncate_copy(clean_hook or source_title or "Clip viral de la semana", 72)
+        title = _truncate_copy(_strip_clip_prefix(clean_hook or source_title or "Clip viral de la semana"), 72)
 
-    caption = title
-    why_line = _truncate_copy(why_it_may_work, 110)
-    if why_line and why_line.lower() not in title.lower():
-        separator = " " if caption.endswith(("...", ".", "!", "?")) else ". "
-        caption = f"{caption}{separator}{why_line}"
-    if signal_tags:
-        caption = f"{caption} | {' · '.join(signal_tags[:3])}"
+    title = _sentence_case(title).rstrip(" .")
+    if title and title[-1] not in "!?" and (len(title.split()) > 3 or len(title) > 28):
+        title = f"{title}..."
+
+    caption_parts = [title] if title else []
+    cta_line = _build_caption_cta(signal_tags, hook, why_it_may_work)
+    if cta_line and _norm_text(cta_line) not in _norm_text(" ".join(caption_parts)):
+        caption_parts.append(cta_line)
+    if source_channel and _norm_text(source_channel) not in _norm_text(" ".join(caption_parts)):
+        caption_parts.append(f"Clip de {source_channel}.")
+    caption = ""
+    for idx, part in enumerate(part.strip() for part in caption_parts if part):
+        if not caption:
+            caption = part
+            continue
+        separator = " "
+        if caption[-1] not in ".!?":
+            separator = ". "
+        caption = f"{caption}{separator}{part}"
+    caption = _truncate_copy(caption, 170)
     hashtags = _build_topic_hashtags(
         source_title,
+        source_channel,
         hook,
         short_description,
         transcript_preview,
         why_it_may_work,
         signal_tags=signal_tags,
     )
+    channel_hashtag = _channel_hashtag(source_channel)
+    if channel_hashtag and channel_hashtag not in hashtags:
+        hashtags = [channel_hashtag, *hashtags][:4]
     return title, caption, hashtags
 
 
@@ -1693,19 +1767,35 @@ def generate_dashboard(config: DashboardConfig, log_fn: Callable[[str], None] = 
         poster_file = ""
         tiktok_title, tiktok_caption, tiktok_hashtags = build_tiktok_copy(
             source_title=source_title,
+            source_channel=str(info.get("channel") or info.get("uploader") or ""),
             hook=seg.hook,
             short_description=cand.short_description,
             why_it_may_work=cand.why_it_may_work,
             transcript_preview=cand.transcript_preview,
             signal_tags=cand.signal_tags,
         )
+        overlay_hook_text = " ".join(
+            part.strip()
+            for part in (tiktok_title, cand.short_description, cand.transcript_preview)
+            if part and part.strip()
+        )
         log_fn(f"Render option {idx}/{len(selected)} ({seg.start:.1f}s -> {seg.end:.1f}s)")
+        subtitle_ass = job_dir / f"option_{idx:02}.ass"
+        if cues:
+            try:
+                if not write_segment_ass(cues, seg.start, seg.end, subtitle_ass, hook_text=overlay_hook_text):
+                    subtitle_ass = None
+            except Exception:
+                subtitle_ass = None
+        else:
+            subtitle_ass = None
         render_short(
             ffmpeg_bin=ffmpeg_bin,
             input_video=source_video,
             output_video=job_dir / preview_name,
             segment=seg,
-            hook_text=seg.hook,
+            hook_text=overlay_hook_text,
+            subtitle_ass=subtitle_ass,
             include_hook_overlay=False,
         )
         (job_dir / preview_name).replace(out_video)

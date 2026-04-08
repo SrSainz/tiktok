@@ -5,7 +5,7 @@ Flow:
 1) Discover candidate YouTube videos (search, channel list, or direct URL).
 2) Pick high-view candidates and download one source video.
 3) Pick the most information-dense segment from subtitles (internal only).
-4) Render a vertical short with hook text (no burned subtitles).
+4) Render a vertical short with hook text, transitions, and stylized burned subtitles.
 5) Optionally upload to TikTok using Playwright with a persistent profile.
 """
 
@@ -355,15 +355,15 @@ def chunk_caption_words(text: str, cue_duration: float) -> List[str]:
     if not words:
         return []
 
-    max_chunks_by_time = max(1, int(cue_duration / 0.75))
-    chunk_count_by_words = max(1, math.ceil(len(words) / 4))
-    chunk_count = min(max_chunks_by_time, chunk_count_by_words, 5, len(words))
+    max_chunks_by_time = max(1, int(cue_duration / 0.55))
+    chunk_count_by_words = max(1, math.ceil(len(words) / 3))
+    chunk_count = min(max_chunks_by_time, chunk_count_by_words, 6, len(words))
     words_per_chunk = max(1, math.ceil(len(words) / chunk_count))
 
     chunks: List[str] = []
     for i in range(0, len(words), words_per_chunk):
         chunk_words = words[i : i + words_per_chunk]
-        chunk_text = wrap_caption_lines(chunk_words, max_line_chars=24, max_lines=1)
+        chunk_text = wrap_caption_lines(chunk_words, max_line_chars=18, max_lines=2).upper()
         if chunk_text:
             chunks.append(chunk_text)
     return chunks
@@ -371,6 +371,156 @@ def chunk_caption_words(text: str, cue_duration: float) -> List[str]:
 
 def ass_escape(text: str) -> str:
     return text.replace("\\", r"\\").replace("{", r"\{").replace("}", r"\}")
+
+
+def ass_filter_path(path: Path) -> str:
+    value = path.name.replace("\\", "/")
+    value = value.replace(":", r"\:")
+    value = value.replace(",", r"\,")
+    value = value.replace("'", r"\'")
+    return value
+
+
+HOOK_STOPWORDS = {
+    "A",
+    "AL",
+    "AQUI",
+    "COMO",
+    "CON",
+    "DE",
+    "DEL",
+    "EL",
+    "ELLA",
+    "ELLOS",
+    "EN",
+    "ERAN",
+    "ERES",
+    "ES",
+    "ESA",
+    "ESE",
+    "ESO",
+    "ESTA",
+    "ESTE",
+    "FUE",
+    "HAY",
+    "LA",
+    "LAS",
+    "LE",
+    "LES",
+    "LO",
+    "LOS",
+    "ME",
+    "MI",
+    "MUY",
+    "NO",
+    "O",
+    "PARA",
+    "PERO",
+    "POR",
+    "QUE",
+    "SE",
+    "SERA",
+    "SERIA",
+    "SI",
+    "SOMOS",
+    "SON",
+    "SOY",
+    "SU",
+    "TE",
+    "TU",
+    "UN",
+    "UNA",
+    "UNO",
+    "Y",
+    "YA",
+}
+
+
+def extract_hook_focus_text(text: str) -> str:
+    clean = clean_caption_text(text)
+    clean = re.sub(
+        r"^(curiosidad/pregunta|dato concreto|momento impactante|momento explicativo|momento entretenido)\s*:\s*",
+        "",
+        clean,
+        flags=re.IGNORECASE,
+    )
+    clean = re.sub(r"\s+", " ", clean).strip(" .,!?:;")
+    if not clean:
+        return ""
+
+    option_candidates: List[str] = []
+    for match in re.finditer(
+        r"([A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9]+(?:\s+[A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9]+){0,3}\s+o\s+[A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9]+(?:\s+[A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9]+){0,3})",
+        clean,
+        flags=re.IGNORECASE,
+    ):
+        tokens = re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9]+", match.group(1), flags=re.UNICODE)
+        compact = [
+            token
+            for token in tokens
+            if token.lower() == "o" or any(ch.isdigit() for ch in token) or token.upper() not in HOOK_STOPWORDS
+        ]
+        if "o" not in {token.lower() for token in compact}:
+            continue
+        parts = " ".join(compact).split()
+        if len(parts) >= 3:
+            option_candidates.append(" ".join(parts))
+    if option_candidates:
+        option_candidates.sort(key=lambda value: (-len(value.split()), value))
+        return option_candidates[0]
+
+    number_phrase = re.search(
+        r"(\d+\s+[A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9]+(?:\s+[A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9]+){0,2})",
+        clean,
+        flags=re.IGNORECASE,
+    )
+    if number_phrase:
+        return number_phrase.group(1)
+
+    words = re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9]+", clean, flags=re.UNICODE)
+    if not words:
+        return ""
+
+    filtered = [
+        word
+        for word in words
+        if any(ch.isdigit() for ch in word) or (len(word) >= 4 and word.upper() not in HOOK_STOPWORDS)
+    ]
+    if filtered:
+        return " ".join(filtered[:4])
+
+    fallback = [word for word in words if any(ch.isdigit() for ch in word) or len(word) >= 3]
+    return " ".join((fallback or words)[:4])
+
+
+def build_hook_lines(hook_text: str) -> List[str]:
+    clean = extract_hook_focus_text(hook_text)
+    words = [word.upper() for word in re.findall(r"\w+", clean, flags=re.UNICODE)]
+    if not words:
+        return []
+
+    selected = words[:4]
+    if len(selected) >= 4:
+        return [" ".join(selected[:2]), " ".join(selected[2:4])]
+    if len(selected) == 3:
+        return [" ".join(selected[:2]), selected[2]]
+    return [" ".join(selected)]
+
+
+def build_hook_ass_markup(hook_text: str) -> str:
+    lines = build_hook_lines(hook_text)
+    if not lines:
+        return ""
+    if len(lines) == 1:
+        words = lines[0].split()
+        if len(words) >= 2:
+            lead = ass_escape(" ".join(words[:2]))
+            rest = ass_escape(" ".join(words[2:]))
+            if rest:
+                return r"{\1c&H0034FF3C&}" + lead + r"{\r}\N" + rest
+            return r"{\1c&H0034FF3C&}" + lead + r"{\r}"
+        return r"{\1c&H0034FF3C&}" + ass_escape(lines[0]) + r"{\r}"
+    return r"{\1c&H0034FF3C&}" + ass_escape(lines[0]) + r"{\r}\N" + ass_escape(lines[1])
 
 
 def chunks_too_similar(a: str, b: str) -> bool:
@@ -382,10 +532,19 @@ def chunks_too_similar(a: str, b: str) -> bool:
     return overlap >= 0.60
 
 
-def write_segment_ass(cues: List[CaptionCue], start: float, end: float, out_path: Path) -> bool:
+def write_segment_ass(cues: List[CaptionCue], start: float, end: float, out_path: Path, hook_text: str = "") -> bool:
     events: List[str] = []
     last_clean = ""
     recent_chunks: List[str] = []
+    segment_duration = max(0.1, end - start)
+
+    hook_markup = build_hook_ass_markup(hook_text)
+    if hook_markup:
+        hook_end = min(max(1.35, segment_duration * 0.24), 1.9, max(0.8, segment_duration - 0.2))
+        events.append(
+            "Dialogue: 0,"
+            f"{fmt_ass(0.08)},{fmt_ass(hook_end)},Hook,,0,0,0,,{hook_markup}"
+        )
 
     for cue in cues:
         if cue.end <= start or cue.start >= end:
@@ -453,7 +612,8 @@ def write_segment_ass(cues: List[CaptionCue], start: float, end: float, out_path
             "Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,"
             "Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,"
             "MarginR,MarginV,Encoding",
-            "Style: Cap,Arial,50,&H00FFFFFF,&H000000FF,&H00000000,&H86000000,1,0,0,0,100,100,0,0,3,1,0,2,84,84,220,1",
+            "Style: Hook,Arial,74,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,4,0,8,96,96,180,1",
+            "Style: Cap,Arial,58,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,3,0,2,84,84,360,1",
             "",
             "[Events]",
             "Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text",
@@ -826,26 +986,35 @@ def render_short(
     output_video: Path,
     segment: SegmentChoice,
     hook_text: str,
+    subtitle_ass: Path | None = None,
     include_hook_overlay: bool = False,
 ) -> None:
+    clip_duration = max(0.15, segment.end - segment.start)
+    fade_out_start = max(0.0, clip_duration - 0.16)
     base_comp = (
         "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,"
         "crop=1080:1920,boxblur=22:12[bg];"
         "[0:v]scale=1080:1920:force_original_aspect_ratio=decrease,"
         "setsar=1,eq=contrast=1.05:saturation=1.10[fg];"
-        "[bg][fg]overlay=(W-w)/2:(H-h)/2[v0]"
+        "[bg][fg]overlay=(W-w)/2:(H-h)/2[vbase]"
     )
-    final_chain = "[v0]"
+    chains = [base_comp]
+    current_label = "[vbase]"
+    if subtitle_ass and subtitle_ass.exists():
+        chains.append(f"{current_label}ass='{ass_filter_path(subtitle_ass)}'[vsub]")
+        current_label = "[vsub]"
     if include_hook_overlay and hook_text.strip():
-        final_chain = (
-            "[v0]drawbox=x=60:y=120:w=960:h=170:color=black@0.28:t=fill,"
+        chains.append(
+            f"{current_label}drawbox=x=60:y=120:w=960:h=170:color=black@0.28:t=fill,"
             "drawtext="
             f"font=Arial:text='{escape_drawtext(hook_text)}':"
-            "x=(w-text_w)/2:y=165:fontsize=52:fontcolor=white:borderw=2:bordercolor=black[vout]"
+            "x=(w-text_w)/2:y=165:fontsize=52:fontcolor=white:borderw=2:bordercolor=black[vhook]"
         )
-        output_map = "[vout]"
-    else:
-        output_map = final_chain
+        current_label = "[vhook]"
+    chains.append(
+        f"{current_label}fade=t=in:st=0:d=0.18,fade=t=out:st={fade_out_start:.3f}:d=0.16[vout]"
+    )
+    output_map = "[vout]"
 
     cmd = [
         ffmpeg_bin,
@@ -858,15 +1027,15 @@ def render_short(
         "-i",
         str(input_video.name),
         "-t",
-        f"{segment.end - segment.start:.3f}",
+        f"{clip_duration:.3f}",
         "-filter_complex",
-        f"{base_comp};{final_chain}" if include_hook_overlay and hook_text.strip() else base_comp,
+        ";".join(chains),
         "-map",
         output_map,
         "-map",
         "0:a?",
         "-af",
-        "loudnorm=I=-16:TP=-1.5:LRA=11",
+        f"loudnorm=I=-16:TP=-1.5:LRA=11,afade=t=in:st=0:d=0.10,afade=t=out:st={max(0.0, clip_duration - 0.12):.3f}:d=0.12",
         "-r",
         "30",
         "-threads",
@@ -903,11 +1072,20 @@ def render_short(
         return
 
     # Fallback for constrained hosts (Railway-like): lower resolution + lighter encode.
+    fb_fade_out_start = max(0.0, clip_duration - 0.16)
     fallback_comp = (
         "[0:v]scale=720:1280:force_original_aspect_ratio=increase,"
         "crop=720:1280,boxblur=18:10[bg];"
         "[0:v]scale=720:1280:force_original_aspect_ratio=decrease,setsar=1[fg];"
-        "[bg][fg]overlay=(W-w)/2:(H-h)/2[v]"
+        "[bg][fg]overlay=(W-w)/2:(H-h)/2[vbase]"
+    )
+    fallback_chains = [fallback_comp]
+    fallback_label = "[vbase]"
+    if subtitle_ass and subtitle_ass.exists():
+        fallback_chains.append(f"{fallback_label}ass='{ass_filter_path(subtitle_ass)}'[vsub]")
+        fallback_label = "[vsub]"
+    fallback_chains.append(
+        f"{fallback_label}fade=t=in:st=0:d=0.18,fade=t=out:st={fb_fade_out_start:.3f}:d=0.16[v]"
     )
     fallback_cmd = [
         ffmpeg_bin,
@@ -920,15 +1098,15 @@ def render_short(
         "-i",
         str(input_video.name),
         "-t",
-        f"{segment.end - segment.start:.3f}",
+        f"{clip_duration:.3f}",
         "-filter_complex",
-        fallback_comp,
+        ";".join(fallback_chains),
         "-map",
         "[v]",
         "-map",
         "0:a?",
         "-af",
-        "loudnorm=I=-16:TP=-1.5:LRA=11",
+        f"loudnorm=I=-16:TP=-1.5:LRA=11,afade=t=in:st=0:d=0.10,afade=t=out:st={max(0.0, clip_duration - 0.12):.3f}:d=0.12",
         "-r",
         "24",
         "-threads",
