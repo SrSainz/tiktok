@@ -21,6 +21,7 @@ from dataclasses import asdict, dataclass
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Callable, List
+from zoneinfo import ZoneInfo
 
 from youtube_tiktok_pipeline import (
     CaptionCue,
@@ -1044,6 +1045,79 @@ def _plan_entry(candidate: VideoCandidate, *, slot: dict[str, str], plan_score: 
     }
 
 
+def _slot_minutes(slot: dict[str, str]) -> int:
+    raw = str(slot.get("publish_time") or "00:00").strip()
+    try:
+        hour_s, minute_s = raw.split(":", 1)
+        return int(hour_s) * 60 + int(minute_s)
+    except Exception:
+        return 0
+
+
+def _pick_active_slots(posts_per_day: int) -> list[dict[str, str]]:
+    posts_per_day = max(1, min(posts_per_day, len(PLANNER_SLOTS)))
+    if posts_per_day >= len(PLANNER_SLOTS):
+        return list(PLANNER_SLOTS)
+
+    timezone_name = os.getenv("PLAN_TIMEZONE", "Europe/Madrid").strip() or "Europe/Madrid"
+    try:
+        now_local = datetime.now(ZoneInfo(timezone_name))
+    except Exception:
+        now_local = datetime.now()
+    now_minutes = now_local.hour * 60 + now_local.minute
+
+    ranked = sorted(
+        enumerate(PLANNER_SLOTS),
+        key=lambda pair: abs(_slot_minutes(pair[1]) - now_minutes),
+    )
+    selected_indexes = sorted(idx for idx, _slot in ranked[:posts_per_day])
+    return [PLANNER_SLOTS[idx] for idx in selected_indexes]
+
+
+def _build_slot_alternatives(
+    candidates: List[VideoCandidate],
+    *,
+    slot: dict[str, str],
+    primary_candidate: VideoCandidate,
+    slot_option_count: int,
+    blocked_channels: set[str],
+) -> list[dict[str, Any]]:
+    if slot_option_count <= 1:
+        return []
+
+    selected_channels = {_channel_key(primary_candidate)}
+    alternatives: list[dict[str, Any]] = []
+    ranked = sorted(
+        candidates,
+        key=lambda candidate: _daily_plan_score(candidate, slot, used_channels=set()),
+        reverse=True,
+    )
+
+    for candidate in ranked:
+        channel_key = _channel_key(candidate)
+        if channel_key in selected_channels:
+            continue
+        if channel_key in blocked_channels:
+            continue
+        score = _daily_plan_score(candidate, slot, used_channels=set())
+        alternatives.append(_plan_entry(candidate, slot=slot, plan_score=score, role="alternative"))
+        selected_channels.add(channel_key)
+        if len(alternatives) >= slot_option_count - 1:
+            return alternatives
+
+    for candidate in ranked:
+        channel_key = _channel_key(candidate)
+        if channel_key in selected_channels:
+            continue
+        score = _daily_plan_score(candidate, slot, used_channels=set())
+        alternatives.append(_plan_entry(candidate, slot=slot, plan_score=score, role="alternative"))
+        selected_channels.add(channel_key)
+        if len(alternatives) >= slot_option_count - 1:
+            break
+
+    return alternatives
+
+
 def build_daily_post_plan(
     *,
     channels: List[str] | None = None,
@@ -1053,11 +1127,13 @@ def build_daily_post_plan(
     max_results: int = 18,
     posts_per_day: int = 4,
     reserve_count: int = 2,
+    slot_option_count: int = 3,
     mode: str = "creators_es",
     log_fn: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     posts_per_day = max(1, min(posts_per_day, len(PLANNER_SLOTS)))
     reserve_count = max(0, min(reserve_count, 4))
+    slot_option_count = max(1, min(slot_option_count, 3))
 
     candidates = discover_creator_videos(
         channels=channels,
@@ -1083,7 +1159,8 @@ def build_daily_post_plan(
     planned: List[dict[str, Any]] = []
     remaining = list(candidates)
 
-    for slot in PLANNER_SLOTS[:posts_per_day]:
+    active_slots = _pick_active_slots(posts_per_day)
+    for slot in active_slots:
         best = max(remaining, key=lambda candidate: _daily_plan_score(candidate, slot, used_channels=used_channels))
         best_score = _daily_plan_score(best, slot, used_channels=used_channels)
         planned.append(_plan_entry(best, slot=slot, plan_score=best_score, role="planned"))
@@ -1091,6 +1168,30 @@ def build_daily_post_plan(
         remaining = [candidate for candidate in remaining if _channel_key(candidate) != _channel_key(best)]
         if not remaining:
             break
+
+    planned_channel_keys = {
+        _channel_key(entry["candidate"])
+        for entry in planned
+        if entry.get("candidate") is not None
+    }
+    for entry in planned:
+        candidate = entry.get("candidate")
+        if candidate is None:
+            entry["alternatives"] = []
+            continue
+        blocked = {key for key in planned_channel_keys if key != _channel_key(candidate)}
+        entry["alternatives"] = _build_slot_alternatives(
+            candidates,
+            slot={
+                "slot_key": str(entry.get("slot_key") or ""),
+                "label": str(entry.get("slot_label") or ""),
+                "publish_time": str(entry.get("publish_time") or ""),
+                "strategy": str(entry.get("strategy") or ""),
+            },
+            primary_candidate=candidate,
+            slot_option_count=slot_option_count,
+            blocked_channels=blocked,
+        )
 
     reserves: List[dict[str, Any]] = []
     for candidate in remaining:
@@ -1120,6 +1221,7 @@ def build_daily_post_plan(
         "mode": mode,
         "posts_per_day": posts_per_day,
         "reserve_count": reserve_count,
+        "slot_option_count": slot_option_count,
         "slots": planned,
         "reserves": reserves,
         "notes": notes,

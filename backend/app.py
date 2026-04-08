@@ -174,6 +174,7 @@ class DailyPlanRequest(BaseModel):
     min_source_duration: int = Field(default=90, ge=30, le=3600)
     posts_per_day: int = Field(default=4, ge=1, le=4)
     reserve_count: int = Field(default=2, ge=0, le=4)
+    slot_option_count: int = Field(default=3, ge=1, le=3)
 
 
 class DailyReviewBatchRequest(DailyPlanRequest):
@@ -181,6 +182,7 @@ class DailyReviewBatchRequest(DailyPlanRequest):
     stride: int = Field(default=10, ge=5, le=30)
     overlap_ratio: float = Field(default=0.40, ge=0.10, le=0.80)
     language: str = Field(default="es", min_length=2, max_length=8)
+    options_per_slot: int = Field(default=3, ge=1, le=3)
 
 
 class CreateJobRequest(BaseModel):
@@ -283,6 +285,11 @@ def _serialize_plan_entry(entry: dict[str, Any]) -> dict[str, Any]:
         "reason": entry.get("reason"),
         "summary": entry.get("summary"),
         "candidate": _serialize_candidate(candidate) if candidate else None,
+        "alternatives": [
+            _serialize_candidate(alt.get("candidate"))
+            for alt in (entry.get("alternatives") or [])
+            if alt.get("candidate") is not None
+        ],
     }
 
 
@@ -470,18 +477,24 @@ def _run_tiktok_browser_fallback(video_path: Path, caption: str, privacy_level: 
 
 def _build_telegram_review_caption(job: dict[str, Any], option: dict[str, Any], result: dict[str, Any]) -> str:
     source_title = str(result.get("source_title") or "Clip Studio ES").strip()
+    source_channel = str(result.get("source_channel") or result.get("channel") or "").strip()
     tiktok_title = str(option.get("tiktok_title") or option.get("short_description") or "").strip()
     tiktok_caption = str(option.get("tiktok_caption") or "").strip()
+    why = str(option.get("why_it_may_work") or "").strip()
     hashtags = " ".join(option.get("tiktok_hashtags") or [])
     lines = [
         "Revision TikTok pendiente",
         f"video: {source_title}",
         f"opcion: {option.get('option_id')}",
     ]
+    if source_channel:
+        lines.append(f"canal: {source_channel}")
     if tiktok_title:
         lines.append(f"titulo: {tiktok_title}")
     if tiktok_caption:
         lines.append(f"caption: {tiktok_caption}")
+    if why:
+        lines.append(f"por que puede funcionar: {why}")
     if hashtags:
         lines.append(f"hashtags: {hashtags}")
     lines.append("Pulsa OK para subir a TikTok.")
@@ -787,13 +800,13 @@ def _set_daily_batch_state(batch_id: str, **updates: Any) -> None:
         batch["updated_at"] = _utc_now_iso()
 
 
-def _update_daily_batch_item(batch_id: str, slot_key: str, **updates: Any) -> None:
+def _update_daily_batch_item(batch_id: str, item_key: str, **updates: Any) -> None:
     with _daily_batches_lock:
         batch = _daily_review_batches.get(batch_id)
         if not batch:
             return
         for item in batch.get("items", []):
-            if item.get("slot_key") == slot_key:
+            if item.get("item_key") == item_key:
                 item.update(updates)
                 break
         batch["updated_at"] = _utc_now_iso()
@@ -810,6 +823,16 @@ def _serialize_daily_batch(batch: dict[str, Any]) -> dict[str, Any]:
             }
             for job_id, job in _jobs.items()
         }
+    with _publish_lock:
+        publish_snapshot = {
+            request_id: {
+                "status": req.get("status"),
+                "error": req.get("error"),
+                "telegram_message_id": req.get("telegram_message_id"),
+                "tiktok_status": req.get("tiktok_status"),
+            }
+            for request_id, req in _publish_requests.items()
+        }
     for item in batch.get("items", []):
         enriched = dict(item)
         job_id = str(enriched.get("job_id") or "").strip()
@@ -818,6 +841,14 @@ def _serialize_daily_batch(batch: dict[str, Any]) -> dict[str, Any]:
             enriched["job_status"] = job.get("status")
             enriched["job_logs_tail"] = job.get("logs", [])
             enriched["job_error"] = job.get("error")
+        request_id = str(enriched.get("request_id") or "").strip()
+        if request_id and request_id in publish_snapshot:
+            publish_req = publish_snapshot[request_id]
+            enriched["review_status"] = publish_req.get("status")
+            enriched["review_error"] = publish_req.get("error")
+            enriched["tiktok_status"] = publish_req.get("tiktok_status")
+            if not enriched.get("telegram_message_id"):
+                enriched["telegram_message_id"] = publish_req.get("telegram_message_id")
         items.append(enriched)
     return {
         "batch_id": batch["batch_id"],
@@ -827,12 +858,28 @@ def _serialize_daily_batch(batch: dict[str, Any]) -> dict[str, Any]:
         "mode": batch.get("mode"),
         "posts_per_day": batch.get("posts_per_day"),
         "reserve_count": batch.get("reserve_count"),
+        "options_per_slot": batch.get("options_per_slot"),
         "notes": batch.get("notes"),
         "plan": batch.get("plan"),
         "items": items,
         "logs": batch.get("logs", []),
         "error": batch.get("error"),
     }
+
+
+def _clear_publish_reply_markup_for_request(req: dict[str, Any]) -> None:
+    message_id = req.get("telegram_message_id")
+    if not message_id:
+        return
+    data: dict[str, Any] = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "message_id": message_id,
+        "reply_markup": json.dumps({"inline_keyboard": []}),
+    }
+    try:
+        _telegram_call("editMessageReplyMarkup", data=data, timeout=60)
+    except HTTPException:
+        pass
 
 
 def _run_daily_review_batch(batch_id: str, req: DailyReviewBatchRequest) -> None:
@@ -848,6 +895,7 @@ def _run_daily_review_batch(batch_id: str, req: DailyReviewBatchRequest) -> None
             max_results=req.max_results,
             posts_per_day=req.posts_per_day,
             reserve_count=req.reserve_count,
+            slot_option_count=req.options_per_slot,
             log_fn=lambda msg: _append_daily_batch_log(batch_id, msg),
         )
         serialized_plan = {
@@ -856,31 +904,43 @@ def _run_daily_review_batch(batch_id: str, req: DailyReviewBatchRequest) -> None
             "mode": plan.get("mode"),
             "posts_per_day": plan.get("posts_per_day"),
             "reserve_count": plan.get("reserve_count"),
+            "options_per_slot": plan.get("slot_option_count"),
             "notes": plan.get("notes"),
             "slots": [_serialize_plan_entry(item) for item in plan.get("slots", [])],
             "reserves": [_serialize_plan_entry(item) for item in plan.get("reserves", [])],
         }
         items: list[dict[str, Any]] = []
         for entry in serialized_plan["slots"]:
-            candidate = entry.get("candidate") or {}
-            items.append(
-                {
-                    "slot_key": entry.get("slot_key"),
-                    "slot_label": entry.get("slot_label"),
-                    "publish_time": entry.get("publish_time"),
-                    "strategy": entry.get("strategy"),
-                    "plan_score": entry.get("plan_score"),
-                    "source_title": candidate.get("title"),
-                    "source_channel": candidate.get("channel"),
-                    "source_url": candidate.get("url"),
-                    "status": "pending",
-                    "job_id": None,
-                    "option_id": None,
-                    "telegram_message_id": None,
-                    "preview_url": None,
-                    "error": None,
-                }
-            )
+            slot_key = str(entry.get("slot_key") or "")
+            slot_candidates = []
+            primary = entry.get("candidate")
+            if primary:
+                slot_candidates.append(primary)
+            slot_candidates.extend(entry.get("alternatives") or [])
+
+            for candidate_idx, candidate in enumerate(slot_candidates, start=1):
+                items.append(
+                    {
+                        "item_key": f"{slot_key}:{candidate_idx}",
+                        "review_group_id": f"{batch_id}:{slot_key}",
+                        "option_rank": candidate_idx,
+                        "slot_key": slot_key,
+                        "slot_label": entry.get("slot_label"),
+                        "publish_time": entry.get("publish_time"),
+                        "strategy": entry.get("strategy"),
+                        "plan_score": entry.get("plan_score"),
+                        "source_title": candidate.get("title"),
+                        "source_channel": candidate.get("channel"),
+                        "source_url": candidate.get("url"),
+                        "status": "pending",
+                        "job_id": None,
+                        "option_id": None,
+                        "telegram_message_id": None,
+                        "preview_url": None,
+                        "request_id": None,
+                        "error": None,
+                    }
+                )
         _set_daily_batch_state(
             batch_id,
             plan=serialized_plan,
@@ -889,6 +949,7 @@ def _run_daily_review_batch(batch_id: str, req: DailyReviewBatchRequest) -> None
             mode=serialized_plan.get("mode"),
             posts_per_day=serialized_plan.get("posts_per_day"),
             reserve_count=serialized_plan.get("reserve_count"),
+            options_per_slot=serialized_plan.get("options_per_slot"),
         )
 
         if not items:
@@ -899,17 +960,22 @@ def _run_daily_review_batch(batch_id: str, req: DailyReviewBatchRequest) -> None
         batch_public_base = _public_base_url()
         failed = 0
         for item in items:
+            item_key = str(item.get("item_key") or "")
             slot_key = str(item.get("slot_key") or "")
             source_url = str(item.get("source_url") or "").strip()
             source_title = str(item.get("source_title") or source_url).strip()
             if not source_url:
                 failed += 1
-                _update_daily_batch_item(batch_id, slot_key, status="failed", error="slot_sin_url")
+                _update_daily_batch_item(batch_id, item_key, status="failed", error="slot_sin_url")
                 continue
 
             job_id = uuid.uuid4().hex
-            _update_daily_batch_item(batch_id, slot_key, status="rendering", job_id=job_id)
-            _append_daily_batch_log(batch_id, f"Generando clip para {item.get('slot_label')}: {source_title}")
+            _update_daily_batch_item(batch_id, item_key, status="rendering", job_id=job_id)
+            _append_daily_batch_log(
+                batch_id,
+                f"Generando opcion {item.get('option_rank')}/"
+                f"{req.options_per_slot} para {item.get('slot_label')}: {source_title}",
+            )
             with _jobs_lock:
                 _jobs[job_id] = {
                     "job_id": job_id,
@@ -943,7 +1009,7 @@ def _run_daily_review_batch(batch_id: str, req: DailyReviewBatchRequest) -> None
             if job.get("status") != "completed" or not job.get("result"):
                 failed += 1
                 err = str(job.get("error") or "job_failed")
-                _update_daily_batch_item(batch_id, slot_key, status="failed", error=err)
+                _update_daily_batch_item(batch_id, item_key, status="failed", error=err)
                 _append_daily_batch_log(batch_id, f"Fallo generando {source_title}: {err}")
                 continue
 
@@ -952,28 +1018,65 @@ def _run_daily_review_batch(batch_id: str, req: DailyReviewBatchRequest) -> None
             option = options[0] if options else None
             if not option:
                 failed += 1
-                _update_daily_batch_item(batch_id, slot_key, status="failed", error="sin_opciones")
+                _update_daily_batch_item(batch_id, item_key, status="failed", error="sin_opciones")
                 _append_daily_batch_log(batch_id, f"{source_title}: el render no produjo opciones.")
                 continue
 
             try:
-                sent = _send_option_to_telegram(job, option, result, base_url=batch_public_base)
+                if _tiktok_enabled():
+                    request_id = uuid.uuid4().hex[:24]
+                    sent = _send_tiktok_review_to_telegram(
+                        job,
+                        option,
+                        result,
+                        request_id=request_id,
+                        base_url=batch_public_base,
+                    )
+                    publish_payload = {
+                        "request_id": request_id,
+                        "job_id": job_id,
+                        "option_id": int(option.get("option_id") or 0),
+                        "status": "pending_review",
+                        "created_at": _utc_now_iso(),
+                        "updated_at": _utc_now_iso(),
+                        "telegram_message_id": sent.get("message_id"),
+                        "privacy_level": None,
+                        "method": sent.get("method"),
+                        "option": option,
+                        "logs": [f"Solicitud enviada a Telegram para {item.get('slot_label')}."],
+                        "error": None,
+                        "publish_id": None,
+                        "tiktok_status": None,
+                        "creator_username": None,
+                        "review_group_id": item.get("review_group_id"),
+                        "review_group_label": f"{item.get('slot_label')} {item.get('publish_time')}".strip(),
+                    }
+                    with _publish_lock:
+                        _publish_requests[request_id] = publish_payload
+                    item_status = "review_sent"
+                else:
+                    request_id = None
+                    sent = _send_option_to_telegram(job, option, result, base_url=batch_public_base)
+                    item_status = "sent"
+
                 _update_daily_batch_item(
                     batch_id,
-                    slot_key,
-                    status="sent",
+                    item_key,
+                    status=item_status,
                     option_id=option.get("option_id"),
                     telegram_message_id=sent.get("message_id"),
                     preview_url=option.get("preview_url"),
+                    request_id=request_id,
                     error=None,
                 )
                 _append_daily_batch_log(
                     batch_id,
-                    f"Revision enviada a Telegram para {source_title} (mensaje {sent.get('message_id')}).",
+                    f"Revision enviada a Telegram para {source_title} "
+                    f"(mensaje {sent.get('message_id')}).",
                 )
             except Exception as exc:
                 failed += 1
-                _update_daily_batch_item(batch_id, slot_key, status="failed", error=str(exc))
+                _update_daily_batch_item(batch_id, item_key, status="failed", error=str(exc))
                 _append_daily_batch_log(batch_id, f"Fallo enviando {source_title} a Telegram: {exc}")
 
         final_status = "completed" if failed == 0 else ("partial_failed" if failed < len(items) else "failed")
@@ -1189,6 +1292,25 @@ def _process_telegram_callback(callback_query: dict[str, Any]) -> None:
     if current_status != "pending_review":
         _telegram_call("answerCallbackQuery", data={"callback_query_id": callback_id, "text": "Ya procesado."}, timeout=30)
         return
+
+    sibling_reqs: list[dict[str, Any]] = []
+    review_group_id = str(req.get("review_group_id") or "").strip()
+    if review_group_id:
+        with _publish_lock:
+            for other_id, other_req in _publish_requests.items():
+                if other_id == request_id:
+                    continue
+                if str(other_req.get("review_group_id") or "").strip() != review_group_id:
+                    continue
+                if other_req.get("status") != "pending_review":
+                    continue
+                other_req["status"] = "not_selected"
+                other_req["updated_at"] = _utc_now_iso()
+                other_req.setdefault("logs", []).append("Descartada al aprobar otra opcion del mismo bloque.")
+                sibling_reqs.append(dict(other_req))
+
+    for sibling_req in sibling_reqs:
+        _clear_publish_reply_markup_for_request(sibling_req)
 
     _set_publish_state(request_id, status="approved")
     _append_publish_log(request_id, "OK recibido desde Telegram.")
@@ -1428,6 +1550,7 @@ def daily_plan(req: DailyPlanRequest) -> dict[str, Any]:
             max_results=req.max_results,
             posts_per_day=req.posts_per_day,
             reserve_count=req.reserve_count,
+            slot_option_count=req.slot_option_count,
         )
         return {
             "date": plan.get("date"),
@@ -1435,6 +1558,7 @@ def daily_plan(req: DailyPlanRequest) -> dict[str, Any]:
             "mode": plan.get("mode"),
             "posts_per_day": plan.get("posts_per_day"),
             "reserve_count": plan.get("reserve_count"),
+            "slot_option_count": plan.get("slot_option_count"),
             "notes": plan.get("notes"),
             "slots": [_serialize_plan_entry(item) for item in plan.get("slots", [])],
             "reserves": [_serialize_plan_entry(item) for item in plan.get("reserves", [])],
@@ -1456,6 +1580,7 @@ def create_daily_review_batch(req: DailyReviewBatchRequest) -> dict[str, Any]:
         "mode": req.mode,
         "posts_per_day": req.posts_per_day,
         "reserve_count": req.reserve_count,
+        "options_per_slot": req.options_per_slot,
         "notes": None,
         "plan": None,
         "items": [],

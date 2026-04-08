@@ -424,16 +424,20 @@
           <div id="candidateList" class="list"></div>
 
           <h2 style="margin-top: 14px">Plan del dia</h2>
-          <div class="row">
-            <div>
-              <label for="planPostsInput">Clips</label>
-              <input id="planPostsInput" type="number" min="1" max="4" value="4" />
+            <div class="row">
+              <div>
+                <label for="planPostsInput">Clips</label>
+                <input id="planPostsInput" type="number" min="1" max="4" value="4" />
+              </div>
+              <div>
+                <label for="planOptionsInput">Opciones/franja</label>
+                <input id="planOptionsInput" type="number" min="1" max="3" value="3" />
+              </div>
+              <div>
+                <label for="planReserveInput">Reservas</label>
+                <input id="planReserveInput" type="number" min="0" max="4" value="2" />
+              </div>
             </div>
-            <div>
-              <label for="planReserveInput">Reservas</label>
-              <input id="planReserveInput" type="number" min="0" max="4" value="2" />
-            </div>
-          </div>
           <button class="btn secondary" id="planBtn" style="margin-top: 10px">Planificar hoy</button>
           <div id="planStatus" class="status">Todavia no hay plan diario.</div>
           <div id="planList" class="list"></div>
@@ -723,19 +727,21 @@
         ui.planList.innerHTML = "";
         const planned = Array.isArray(plan?.slots) ? plan.slots : [];
         const reserves = Array.isArray(plan?.reserves) ? plan.reserves : [];
-        const rows = [...planned, ...reserves];
-        if (!rows.length) {
-          return;
-        }
-        rows.forEach((entry, idx) => {
-          const row = document.createElement("div");
-          row.className = "item";
-          const candidate = entry?.candidate || {};
-          const publishLabel = entry.publish_time ? `${entry.publish_time}` : "";
-          const role = entry.role === "reserve" ? "Reserva" : entry.slot_label || `Slot ${idx + 1}`;
-          const strategy = String(entry.strategy || "").trim();
-          row.innerHTML = `
-            <div class="slot">${escapeHtml(role)}${publishLabel ? ` | ${escapeHtml(publishLabel)}` : ""}</div>
+          const rows = [...planned, ...reserves];
+          if (!rows.length) {
+            return;
+          }
+          rows.forEach((entry, idx) => {
+            const row = document.createElement("div");
+            row.className = "item";
+            const candidate = entry?.candidate || {};
+            const alternatives = Array.isArray(entry?.alternatives) ? entry.alternatives : [];
+            const publishLabel = entry.publish_time ? `${entry.publish_time}` : "";
+            const role = entry.role === "reserve" ? "Reserva" : entry.slot_label || `Slot ${idx + 1}`;
+            const strategy = String(entry.strategy || "").trim();
+            const optionMeta = entry.role === "reserve" ? "" : ` | ${1 + alternatives.length} opciones`;
+            row.innerHTML = `
+            <div class="slot">${escapeHtml(role)}${publishLabel ? ` | ${escapeHtml(publishLabel)}` : ""}${optionMeta ? escapeHtml(optionMeta) : ""}</div>
             <div class="title">${escapeHtml(candidate.title || "Sin titulo")}</div>
             <div class="meta">${escapeHtml(candidate.channel || "Canal")} | score ${Number(entry.plan_score || 0).toFixed(1)}</div>
             ${strategy ? `<div class="meta">${escapeHtml(strategy)}</div>` : ""}
@@ -781,16 +787,18 @@
             max_results: Math.max(12, readNumberInput("limitInput", 12)),
             this_week_only: Boolean($("weekOnly").checked),
             posts_per_day: readNumberInput("planPostsInput", 4),
+            slot_option_count: readNumberInput("planOptionsInput", 3),
             reserve_count: readNumberInput("planReserveInput", 2)
           };
           const data = await api("/api/plan/daily", payload, 120000);
           renderDailyPlan(data);
           const slotCount = Array.isArray(data?.slots) ? data.slots.length : 0;
           const reserveCount = Array.isArray(data?.reserves) ? data.reserves.length : 0;
+          const optionsPerSlot = Number(data?.slot_option_count || payload.slot_option_count || 1);
           const note = String(data?.notes || "").trim();
           setStatus(
             ui.planStatus,
-            `Plan listo: ${slotCount} clips + ${reserveCount} reservas.${note ? ` ${note}` : ""}`,
+            `Plan listo: ${slotCount} franjas x ${optionsPerSlot} opciones + ${reserveCount} reservas.${note ? ` ${note}` : ""}`,
             false
           );
         } catch (err) {
@@ -811,13 +819,16 @@
           const title = String(item.source_title || `Clip ${idx + 1}`);
           const status = String(item.status || "pending");
           const jobStatus = String(item.job_status || "").trim();
+          const reviewStatus = String(item.review_status || "").trim();
           const logTail = Array.isArray(item.job_logs_tail) ? item.job_logs_tail.slice(-2) : [];
           const meta = [
             item.slot_label || `Slot ${idx + 1}`,
             item.publish_time || "",
+            item.option_rank ? `opcion ${item.option_rank}` : "",
             item.source_channel || "",
             status,
-            jobStatus && jobStatus !== status ? `job ${jobStatus}` : ""
+            jobStatus && jobStatus !== status ? `job ${jobStatus}` : "",
+            reviewStatus && reviewStatus !== status ? `review ${reviewStatus}` : ""
           ].filter(Boolean).join(" | ");
           const extra = item.error
             ? escapeHtml(item.error)
@@ -883,6 +894,7 @@
             this_week_only: Boolean($("weekOnly").checked),
             posts_per_day: readNumberInput("planPostsInput", 4),
             reserve_count: readNumberInput("planReserveInput", 2),
+            options_per_slot: readNumberInput("planOptionsInput", 3),
             duration: readNumberInput("durationInput", 60),
             stride: readNumberInput("strideInput", 10),
             overlap_ratio: readNumberInput("overlapInput", 0.4),
@@ -891,7 +903,11 @@
           const data = await api("/api/plan/daily/reviews", payload, 45000);
           state.dailyBatchId = String(data.batch_id || "");
           renderDailyBatch(data);
-          setStatus(ui.planBatchStatus, "Batch diario lanzado. Generando clips y enviando revisiones a Telegram...", false);
+          setStatus(
+            ui.planBatchStatus,
+            `Batch diario lanzado. Preparando ${payload.options_per_slot} opciones por franja para Telegram...`,
+            false
+          );
           state.batchPollTimer = setInterval(pollDailyBatch, 5000);
           pollDailyBatch();
         } catch (err) {
