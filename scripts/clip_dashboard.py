@@ -26,6 +26,7 @@ from youtube_tiktok_pipeline import (
     CaptionCue,
     SegmentChoice,
     VideoCandidate,
+    clean_caption_text,
     compute_views_per_day,
     discover_most_popular_es,
     download_source_video,
@@ -980,7 +981,8 @@ def window_scene_cut_count(scene_times: List[float], start: float, end: float) -
 
 
 def summarize_transcript_preview(cues: List[CaptionCue], max_chars: int = 180) -> str:
-    text = " ".join(c.text.strip() for c in cues if c.text.strip())
+    cleaned_parts = [clean_caption_text(c.text) for c in cues]
+    text = " ".join(part for part in cleaned_parts if part)
     text = re.sub(r"\s+", " ", text).strip()
     if not text:
         return ""
@@ -1105,9 +1107,12 @@ def _description_from_cues(in_window: List[CaptionCue]) -> tuple[str, str]:
     if not in_window:
         return "Momento destacado", "Fragmento con potencial de retencion."
 
-    joined = " ".join(c.text for c in in_window)
-    joined = html.unescape(joined)
-    joined = re.sub(r"\[&nbsp;__&nbsp;\]", " ", joined, flags=re.IGNORECASE)
+    cleaned_cues = [clean_caption_text(c.text) for c in in_window]
+    cleaned_cues = [text for text in cleaned_cues if text]
+    if not cleaned_cues:
+        return "Momento destacado", "Fragmento con potencial de retencion."
+
+    joined = " ".join(cleaned_cues)
     tokens = re.findall(r"\w+", joined.lower(), flags=re.UNICODE)
     num_hits = sum(1 for t in tokens if t.isdigit())
     has_question = "?" in joined
@@ -1127,15 +1132,12 @@ def _description_from_cues(in_window: List[CaptionCue]) -> tuple[str, str]:
         theme = "Momento entretenido"
 
     sample = ""
-    for cue in in_window:
-        txt = html.unescape(cue.text)
-        txt = re.sub(r"\[&nbsp;__&nbsp;\]", " ", txt, flags=re.IGNORECASE)
-        txt = re.sub(r"\s+", " ", txt).strip()
+    for txt in cleaned_cues:
         if len(txt) >= 22:
             sample = txt
             break
     if not sample:
-        sample = re.sub(r"\s+", " ", in_window[0].text).strip()
+        sample = cleaned_cues[0]
     words = sample.split()
     if len(words) > 15:
         sample = " ".join(words[:15]) + "..."
@@ -1815,10 +1817,11 @@ def generate_dashboard(config: DashboardConfig, log_fn: Callable[[str], None] = 
             transcript_preview=cand.transcript_preview,
             signal_tags=cand.signal_tags,
         )
-        overlay_hook_text = " ".join(
-            part.strip()
-            for part in (tiktok_title, cand.short_description, cand.transcript_preview)
-            if part and part.strip()
+        overlay_hook_text = (
+            _strip_clip_prefix(tiktok_title).rstrip(".!?… ").strip()
+            or _strip_clip_prefix(extract_hook_focus_text(seg.hook)).rstrip(".!?… ").strip()
+            or _strip_clip_prefix(cand.short_description).rstrip(".!?… ").strip()
+            or _strip_clip_prefix(cand.transcript_preview).rstrip(".!?… ").strip()
         )
         log_fn(f"Render option {idx}/{len(selected)} ({seg.start:.1f}s -> {seg.end:.1f}s)")
         subtitle_ass = job_dir / f"option_{idx:02}.ass"

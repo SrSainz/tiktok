@@ -12,6 +12,7 @@ Flow:
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import math
 import os
@@ -19,6 +20,7 @@ import re
 import subprocess
 import sys
 import time
+import unicodedata
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -63,6 +65,42 @@ IMPACT_WORDS = {
     "top",
     "record",
 }
+
+CAPTION_FILLER_WORDS = {
+    "a",
+    "ah",
+    "aja",
+    "al",
+    "bro",
+    "buah",
+    "eh",
+    "ehh",
+    "hmm",
+    "jaja",
+    "jeje",
+    "mmm",
+    "oh",
+    "oye",
+    "pam",
+    "pim",
+    "pues",
+    "pum",
+    "vale",
+    "ver",
+    "wow",
+    "ya",
+}
+
+CAPTION_NOISE_LABELS = {
+    "aplausos",
+    "music",
+    "musica",
+    "música",
+    "risas",
+    "sonido",
+}
+
+CAPTION_KEEP_SHORT_WORDS = {"o", "u", "y", "vs", "no", "si"}
 
 
 @dataclass
@@ -152,7 +190,20 @@ def fmt_srt(seconds: float) -> str:
 
 
 def normalize_text(text: str) -> str:
+    text = html.unescape(text or "")
+    text = text.replace("\xa0", " ")
+    text = unicodedata.normalize("NFKC", text)
+    if any(marker in text for marker in ("Ã", "Â", "â", "€", "™", "œ", "�")):
+        try:
+            repaired = text.encode("latin-1").decode("utf-8")
+            if repaired.count("Ã") + repaired.count("Â") + repaired.count("�") < text.count("Ã") + text.count("Â") + text.count("�"):
+                text = repaired
+        except Exception:
+            pass
     text = re.sub(r"<[^>]+>", "", text)
+    text = text.replace("&nbsp;", " ")
+    text = text.replace("nbsp", " ")
+    text = re.sub(r"[♪♫]+", " ", text)
     text = text.replace("\n", " ")
     text = re.sub(r"\s+", " ", text).strip()
     return text
@@ -174,6 +225,52 @@ def score_text(text: str) -> int:
     numeric_hits = sum(1 for t in tokens if t.isdigit())
     punct_bonus = text.count("!") + text.count("?")
     return impact_hits * 4 + numeric_hits * 2 + punct_bonus
+
+
+def _tokenize_caption_words(text: str) -> List[str]:
+    return re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9]+", text, flags=re.UNICODE)
+
+
+def _is_meaningful_caption_word(word: str) -> bool:
+    token = word.strip().lower()
+    if not token:
+        return False
+    if token in CAPTION_KEEP_SHORT_WORDS:
+        return True
+    if any(ch.isdigit() for ch in token):
+        return True
+    if token in IMPACT_WORDS:
+        return True
+    if token in CAPTION_FILLER_WORDS:
+        return False
+    return len(token) >= 4 and token.upper() not in HOOK_STOPWORDS
+
+
+def _trim_caption_tokens(tokens: List[str]) -> List[str]:
+    trimmed = list(tokens)
+    while trimmed and not _is_meaningful_caption_word(trimmed[0]):
+        trimmed.pop(0)
+    while trimmed and not _is_meaningful_caption_word(trimmed[-1]):
+        trimmed.pop()
+    return trimmed
+
+
+def _is_low_value_caption(tokens: List[str]) -> bool:
+    if not tokens:
+        return True
+    lowered = [token.lower() for token in tokens if token]
+    unique = {token for token in lowered if token}
+    meaningful = [token for token in lowered if _is_meaningful_caption_word(token)]
+    if not meaningful:
+        return True
+    if len(unique) == 1 and len(lowered) >= 2:
+        return True
+    if len(lowered) <= 3 and len(meaningful) <= 1 and not any(any(ch.isdigit() for ch in token) for token in lowered):
+        return True
+    filler_ratio = sum(1 for token in lowered if token in CAPTION_FILLER_WORDS or token.upper() in HOOK_STOPWORDS) / max(1, len(lowered))
+    if filler_ratio >= 0.7 and len(meaningful) <= 2:
+        return True
+    return False
 
 
 def parse_upload_date_ymd(upload_date: Optional[str]) -> Optional[date]:
@@ -251,16 +348,26 @@ def pick_hook(cues: Iterable[CaptionCue]) -> str:
     best_text = ""
     best_score = -1
     for cue in cues:
-        s = score_text(cue.text)
+        clean = clean_caption_text(cue.text)
+        if not clean:
+            continue
+        focus = extract_hook_focus_text(clean) or clean
+        tokens = _trim_caption_tokens(_tokenize_caption_words(focus))
+        if _is_low_value_caption(tokens):
+            continue
+        candidate = " ".join(tokens[:6]).strip()
+        if not candidate:
+            continue
+        s = score_text(candidate) + min(6, len(tokens)) + (2 if "?" in cue.text else 0)
         if s > best_score:
             best_score = s
-            best_text = cue.text
+            best_text = candidate
     if not best_text:
         return "NO TE LO PIERDAS"
 
-    tokens = re.findall(r"[A-Za-z0-9]+", best_text)
-    short = " ".join(tokens[:6]).upper()[:34].strip()
-    if len(short) < 10:
+    tokens = _trim_caption_tokens(_tokenize_caption_words(best_text))
+    short = " ".join(tokens[:6]).strip()
+    if len(short) < 6:
         short = "NO TE LO PIERDAS"
     return short
 
@@ -320,8 +427,26 @@ def clean_caption_text(text: str) -> str:
     text = normalize_text(text)
     text = re.sub(r"\[[^\]]+\]", "", text)
     text = re.sub(r"\([^)]+\)", "", text)
+    text = re.sub(r"\b(?:music|musica|música|aplausos|risas|sonido original)\b", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\b([A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9]+)(?:\s+\1\b){1,}", r"\1", text, flags=re.IGNORECASE)
     text = re.sub(r"\s+", " ", text).strip()
-    return text
+    tokens = _trim_caption_tokens(_tokenize_caption_words(text))
+    if _is_low_value_caption(tokens):
+        return ""
+    filtered: List[str] = []
+    prev = ""
+    for token in tokens:
+        low = token.lower()
+        if low in CAPTION_NOISE_LABELS:
+            continue
+        if low == prev and low not in CAPTION_KEEP_SHORT_WORDS:
+            continue
+        filtered.append(token)
+        prev = low
+    filtered = _trim_caption_tokens(filtered)
+    if _is_low_value_caption(filtered):
+        return ""
+    return " ".join(filtered)
 
 
 def wrap_caption_lines(words: List[str], max_line_chars: int = 24, max_lines: int = 1) -> str:
@@ -351,19 +476,24 @@ def wrap_caption_lines(words: List[str], max_line_chars: int = 24, max_lines: in
 
 
 def chunk_caption_words(text: str, cue_duration: float) -> List[str]:
-    words = [w for w in re.findall(r"\w+", text, flags=re.UNICODE) if w]
+    clean = clean_caption_text(text)
+    words = _trim_caption_tokens(_tokenize_caption_words(clean))
     if not words:
+        return []
+    if _is_low_value_caption(words):
         return []
 
     max_chunks_by_time = max(1, int(cue_duration / 0.55))
-    chunk_count_by_words = max(1, math.ceil(len(words) / 3))
-    chunk_count = min(max_chunks_by_time, chunk_count_by_words, 6, len(words))
+    chunk_count_by_words = max(1, math.ceil(len(words) / 4))
+    chunk_count = min(max_chunks_by_time, chunk_count_by_words, 4, len(words))
     words_per_chunk = max(1, math.ceil(len(words) / chunk_count))
 
     chunks: List[str] = []
     for i in range(0, len(words), words_per_chunk):
-        chunk_words = words[i : i + words_per_chunk]
-        chunk_text = wrap_caption_lines(chunk_words, max_line_chars=18, max_lines=2).upper()
+        chunk_words = _trim_caption_tokens(words[i : i + words_per_chunk])
+        if not chunk_words or _is_low_value_caption(chunk_words):
+            continue
+        chunk_text = wrap_caption_lines(chunk_words, max_line_chars=20, max_lines=2).upper()
         if chunk_text:
             chunks.append(chunk_text)
     return chunks
@@ -503,6 +633,11 @@ def build_hook_lines(hook_text: str) -> List[str]:
     if not words:
         return []
 
+    if len(words) >= 4 and words[:2] == words[2:4]:
+        words = words[:2]
+    elif len(words) >= 2 and len(set(words[:2])) == 1:
+        words = [words[0], *words[2:]]
+
     selected = words[:4]
     if len(selected) >= 4:
         return [" ".join(selected[:2]), " ".join(selected[2:4])]
@@ -570,6 +705,7 @@ def write_segment_ass(cues: List[CaptionCue], start: float, end: float, out_path
     events: List[str] = []
     last_clean = ""
     recent_chunks: List[str] = []
+    recent_clean_texts: List[str] = []
     segment_duration = max(0.1, end - start)
 
     hook_markup = build_hook_ass_markup(hook_text)
@@ -594,6 +730,17 @@ def write_segment_ass(cues: List[CaptionCue], start: float, end: float, out_path
         if not clean:
             continue
         if clean.lower() == last_clean.lower():
+            continue
+        clean_norm = clean.lower().strip()
+        redundant_cue = False
+        for prev in recent_clean_texts:
+            if clean_norm == prev or clean_norm in prev:
+                redundant_cue = True
+                break
+            if chunks_too_similar(clean_norm, prev) and len(clean_norm) <= (len(prev) + 12):
+                redundant_cue = True
+                break
+        if redundant_cue:
             continue
 
         chunks = chunk_caption_words(clean, cue_dur)
@@ -629,6 +776,8 @@ def write_segment_ass(cues: List[CaptionCue], start: float, end: float, out_path
             recent_chunks = recent_chunks[-4:]
 
         last_clean = clean
+        recent_clean_texts.append(clean_norm)
+        recent_clean_texts = recent_clean_texts[-3:]
 
     if not events:
         return False
@@ -646,8 +795,8 @@ def write_segment_ass(cues: List[CaptionCue], start: float, end: float, out_path
             "Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,"
             "Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,"
             "MarginR,MarginV,Encoding",
-            "Style: Hook,Arial,74,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,4,0,8,96,96,180,1",
-            "Style: Cap,Arial,58,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,3,0,2,84,84,360,1",
+            "Style: Hook,Arial,70,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,4,0,8,92,92,228,1",
+            "Style: Cap,Arial,60,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,4,0,2,88,88,520,1",
             "",
             "[Events]",
             "Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text",
