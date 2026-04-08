@@ -254,6 +254,12 @@ class PrepareTikTokReviewRequest(BaseModel):
     privacy_level: str | None = Field(default=None, min_length=3, max_length=64)
 
 
+class PrepareTikTokReviewFromOutputRequest(BaseModel):
+    output_slug: str = Field(min_length=3, max_length=200)
+    option_id: int = Field(ge=1, le=99)
+    privacy_level: str | None = Field(default=None, min_length=3, max_length=64)
+
+
 class SchedulerTriggerRequest(BaseModel):
     slot_label: str | None = Field(default=None, min_length=4, max_length=16)
 
@@ -899,6 +905,58 @@ def _append_log(job_id: str, message: str) -> None:
         if len(job["logs"]) > 1200:
             job["logs"] = job["logs"][-1200:]
         job["updated_at"] = _utc_now_iso()
+
+
+def _safe_output_slug(output_slug: str) -> str:
+    slug = str(output_slug or "").strip().strip("/\\")
+    if not slug or slug in {".", ".."}:
+        raise HTTPException(status_code=400, detail="invalid_output_slug")
+    if any(part in {"..", ""} for part in Path(slug).parts):
+        raise HTTPException(status_code=400, detail="invalid_output_slug")
+    return slug
+
+
+def _load_result_from_output_slug(output_slug: str) -> tuple[str, dict[str, Any]]:
+    safe_slug = _safe_output_slug(output_slug)
+    manifest_path = (OUTPUT_DIR / safe_slug / "options_manifest.json").resolve()
+    output_root = OUTPUT_DIR.resolve()
+    try:
+        manifest_path.relative_to(output_root)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="invalid_output_slug") from exc
+    if not manifest_path.exists() or not manifest_path.is_file():
+        raise HTTPException(status_code=404, detail="output_manifest_not_found")
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"output_manifest_invalid: {exc}") from exc
+
+    options = []
+    for raw_option in payload.get("options") or []:
+        option = dict(raw_option)
+        preview_file = str(option.get("preview_file") or "").strip()
+        poster_file = str(option.get("poster_file") or "").strip()
+        manual_upload_file = str(option.get("manual_upload_file") or "").strip()
+        if not manual_upload_file and preview_file:
+            manual_upload_file = str((OUTPUT_DIR / safe_slug / preview_file).resolve())
+        option["manual_upload_file"] = manual_upload_file
+        if preview_file:
+            option["manual_upload_url"] = f"/output/{safe_slug}/{preview_file}"
+        if poster_file:
+            option["poster_url"] = f"/output/{safe_slug}/{poster_file}"
+        options.append(option)
+
+    result = {
+        "source_title": payload.get("source_title"),
+        "source_url": payload.get("source_url"),
+        "source_duration": payload.get("source_duration"),
+        "source_channel": payload.get("source_channel") or payload.get("channel") or "",
+        "output_dir": str((OUTPUT_DIR / safe_slug).resolve()),
+        "dashboard_url": f"/output/{safe_slug}/dashboard.html",
+        "manifest_url": f"/output/{safe_slug}/options_manifest.json",
+        "options": options,
+    }
+    return safe_slug, result
 
 
 def _set_job_state(job_id: str, **updates: Any) -> None:
@@ -2082,6 +2140,59 @@ def prepare_tiktok_review(req: PrepareTikTokReviewRequest, request: Request) -> 
     with _publish_lock:
         _publish_requests[request_id] = payload
     _append_log(req.job_id, f"Solicitud TikTok enviada a Telegram para opcion {req.option_id}.")
+    return {"ok": True, **_serialize_publish_request(payload)}
+
+
+@app.post("/api/publish/telegram-review-from-output")
+def prepare_tiktok_review_from_output(req: PrepareTikTokReviewFromOutputRequest, request: Request) -> dict[str, Any]:
+    safe_slug, result = _load_result_from_output_slug(req.output_slug)
+    options = result.get("options") or []
+    option = next((opt for opt in options if int(opt.get("option_id") or 0) == req.option_id), None)
+    if not option:
+        raise HTTPException(status_code=404, detail="option_not_found")
+
+    synthetic_job_id = f"output:{safe_slug}"
+    synthetic_job = {
+        "job_id": synthetic_job_id,
+        "status": "completed",
+        "created_at": _utc_now_iso(),
+        "updated_at": _utc_now_iso(),
+        "request": {
+            "url": result.get("source_url"),
+            "duration": int(round(float(option.get("duration") or 60))),
+            "options": len(options),
+        },
+        "logs": [f"Revision reabierta desde output/{safe_slug}."],
+        "result": result,
+        "error": None,
+        "traceback": None,
+    }
+    with _jobs_lock:
+        _jobs[synthetic_job_id] = synthetic_job
+
+    request_id = uuid.uuid4().hex[:24]
+    sent = _send_tiktok_review_to_telegram(synthetic_job, option, result, request, request_id=request_id)
+    payload = {
+        "request_id": request_id,
+        "job_id": synthetic_job_id,
+        "option_id": req.option_id,
+        "status": "pending_review",
+        "created_at": _utc_now_iso(),
+        "updated_at": _utc_now_iso(),
+        "telegram_message_id": sent.get("message_id"),
+        "privacy_level": req.privacy_level,
+        "method": sent.get("method"),
+        "option": option,
+        "logs": [f"Solicitud reabierta desde output/{safe_slug}."],
+        "error": None,
+        "publish_id": None,
+        "tiktok_status": None,
+        "creator_username": None,
+        "review_group_id": f"output:{safe_slug}",
+    }
+    with _publish_lock:
+        _publish_requests[request_id] = payload
+    _append_log(synthetic_job_id, f"Solicitud TikTok reenviada a Telegram para opcion {req.option_id}.")
     return {"ok": True, **_serialize_publish_request(payload)}
 
 
