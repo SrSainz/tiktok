@@ -434,12 +434,13 @@ def build_tiktok_copy(
         _strip_clip_prefix(extract_hook_focus_text(f"{short_description}. {transcript_preview}. {hook}")),
         48,
     )
+    focus_tokens = re.findall(r"\w+", focus_title, flags=re.UNICODE)
     lead_candidates = [
         _truncate_copy(_strip_clip_prefix(short_description), 72),
         _truncate_copy(_strip_clip_prefix(transcript_preview), 72),
         _truncate_copy(_strip_clip_prefix(source_title), 72),
     ]
-    if focus_title and len(focus_title) >= 8:
+    if focus_title and len(focus_title) >= 8 and re.search(r"\b\d+\b|\bo\b", focus_title, flags=re.IGNORECASE):
         lead_candidates.insert(0, focus_title)
     if clean_hook and not _looks_noisy_title(hook):
         lead_candidates.insert(0, clean_hook)
