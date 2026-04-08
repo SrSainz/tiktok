@@ -192,6 +192,7 @@ class CreateJobRequest(BaseModel):
     stride: int = Field(default=10, ge=5, le=30)
     overlap_ratio: float = Field(default=0.40, ge=0.10, le=0.80)
     language: str = Field(default="es", min_length=2, max_length=8)
+    fast_render: bool = False
 
 
 class ShareTelegramRequest(BaseModel):
@@ -989,6 +990,7 @@ def _run_daily_review_batch(batch_id: str, req: DailyReviewBatchRequest) -> None
                         "stride": req.stride,
                         "overlap_ratio": req.overlap_ratio,
                         "language": req.language,
+                        "fast_render": True,
                     },
                     "result": None,
                     "error": None,
@@ -1001,6 +1003,7 @@ def _run_daily_review_batch(batch_id: str, req: DailyReviewBatchRequest) -> None
                 stride=req.stride,
                 overlap_ratio=req.overlap_ratio,
                 language=req.language,
+                fast_render=True,
             )
             _run_job(job_id, create_req)
             with _jobs_lock:
@@ -1364,6 +1367,7 @@ def _run_job(job_id: str, req: CreateJobRequest) -> None:
             options=req.options,
             stride=req.stride,
             overlap_ratio=req.overlap_ratio,
+            fast_render=req.fast_render,
             output_dir=str(OUTPUT_DIR),
             work_dir=str(WORK_DIR),
         )

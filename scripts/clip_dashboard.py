@@ -182,6 +182,7 @@ class DashboardConfig:
     stride: int = 10
     max_pool: int = 50
     overlap_ratio: float = 0.40
+    fast_render: bool = False
     output_dir: str = "output"
     work_dir: str = "work"
 
@@ -2359,6 +2360,7 @@ def generate_dashboard(config: DashboardConfig, log_fn: Callable[[str], None] = 
             hook_text=overlay_hook_text,
             subtitle_ass=subtitle_ass,
             include_hook_overlay=False,
+            fast_render=config.fast_render,
         )
         (job_dir / preview_name).replace(out_video)
         try:

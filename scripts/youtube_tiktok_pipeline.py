@@ -1119,6 +1119,8 @@ def finalize_clip_with_outro(
     main_clip: Path,
     output_video: Path,
     outro_video: Optional[Path],
+    *,
+    fast_render: bool = False,
 ) -> None:
     if not outro_video or not outro_video.exists():
         if main_clip != output_video:
@@ -1126,6 +1128,14 @@ def finalize_clip_with_outro(
                 output_video.unlink()
             main_clip.replace(output_video)
         return
+
+    output_width = 720 if fast_render else 1080
+    output_height = 1280 if fast_render else 1920
+    blur = "14:7" if fast_render else "22:12"
+    preset = "ultrafast" if fast_render else "superfast"
+    crf = "24" if fast_render else "23"
+    maxrate = "2200k" if fast_render else "4500k"
+    bufsize = "4400k" if fast_render else "9000k"
 
     cmd = [
         ffmpeg_bin,
@@ -1140,9 +1150,9 @@ def finalize_clip_with_outro(
         "-filter_complex",
         ";".join(
             [
-                "[0:v]scale=1080:1920,setsar=1,format=yuv420p,fps=30[v0]",
-                "[1:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=22:12[obg]",
-                "[1:v]scale=1080:1920:force_original_aspect_ratio=decrease,setsar=1,eq=contrast=1.03:saturation=1.05[ofg]",
+                f"[0:v]scale={output_width}:{output_height},setsar=1,format=yuv420p,fps=30[v0]",
+                f"[1:v]scale={output_width}:{output_height}:force_original_aspect_ratio=increase,crop={output_width}:{output_height},boxblur={blur}[obg]",
+                f"[1:v]scale={output_width}:{output_height}:force_original_aspect_ratio=decrease,setsar=1,eq=contrast=1.03:saturation=1.05[ofg]",
                 "[obg][ofg]overlay=(W-w)/2:(H-h)/2,setsar=1,format=yuv420p,fps=30,fade=t=in:st=0:d=0.12[v1]",
                 "[0:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a0]",
                 "[1:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,afade=t=in:st=0:d=0.06[a1]",
@@ -1162,13 +1172,13 @@ def finalize_clip_with_outro(
         "-level:v",
         "4.1",
         "-preset",
-        "superfast",
+        preset,
         "-crf",
-        "23",
+        crf,
         "-maxrate",
-        "4500k",
+        maxrate,
         "-bufsize",
-        "9000k",
+        bufsize,
         "-pix_fmt",
         "yuv420p",
         "-c:a",
@@ -1269,6 +1279,7 @@ def render_short(
     hook_text: str,
     subtitle_ass: Path | None = None,
     include_hook_overlay: bool = False,
+    fast_render: bool = False,
 ) -> None:
     branded_outro = locate_brand_outro()
     main_output = output_video.with_name(f"{output_video.stem}.main{output_video.suffix}")
@@ -1278,6 +1289,91 @@ def render_short(
         output_video.unlink()
     clip_duration = max(0.15, segment.end - segment.start)
     fade_out_start = max(0.0, clip_duration - 0.16)
+    if fast_render:
+        fast_fade_out_start = max(0.0, clip_duration - 0.14)
+        fast_intro = (
+            "[vpre]scale="
+            "w='if(lt(t,0.45),720*(1.04-0.04*t/0.45),720)':"
+            "h='if(lt(t,0.45),1280*(1.04-0.04*t/0.45),1280)':"
+            "eval=frame,crop=720:1280[vzoom]"
+        )
+        fast_comp = (
+            "[0:v]scale=720:1280:force_original_aspect_ratio=increase,"
+            "crop=720:1280,boxblur=12:6[bg];"
+            "[0:v]scale=720:1280:force_original_aspect_ratio=decrease,"
+            "setsar=1[fg];"
+            "[bg][fg]overlay=(W-w)/2:(H-h)/2[vpre]"
+        )
+        fast_chains = [fast_comp, fast_intro]
+        fast_label = "[vzoom]"
+        if subtitle_ass and subtitle_ass.exists():
+            fast_chains.append(f"{fast_label}ass='{ass_filter_path(subtitle_ass)}'[vsub]")
+            fast_label = "[vsub]"
+        if include_hook_overlay and hook_text.strip():
+            fast_chains.append(
+                f"{fast_label}drawbox=x=40:y=92:w=640:h=120:color=black@0.24:t=fill,"
+                "drawtext="
+                f"font=Arial:text='{escape_drawtext(hook_text)}':"
+                "x=(w-text_w)/2:y=128:fontsize=34:fontcolor=white:borderw=2:bordercolor=black[vhook]"
+            )
+            fast_label = "[vhook]"
+        fast_chains.append(
+            f"{fast_label}fade=t=in:st=0:d=0.14,fade=t=out:st={fast_fade_out_start:.3f}:d=0.14[vout]"
+        )
+        fast_cmd = [
+            ffmpeg_bin,
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-ss",
+            f"{segment.start:.3f}",
+            "-i",
+            str(input_video.name),
+            "-t",
+            f"{clip_duration:.3f}",
+            "-filter_complex",
+            ";".join(fast_chains),
+            "-map",
+            "[vout]",
+            "-map",
+            "0:a?",
+            "-af",
+            f"aresample=48000,volume=1.06,afade=t=in:st=0:d=0.08,afade=t=out:st={max(0.0, clip_duration - 0.10):.3f}:d=0.10",
+            "-r",
+            "30",
+            "-threads",
+            "2",
+            "-c:v",
+            "libx264",
+            "-profile:v",
+            "high",
+            "-preset",
+            "ultrafast",
+            "-crf",
+            "24",
+            "-maxrate",
+            "2200k",
+            "-bufsize",
+            "4400k",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-ar",
+            "48000",
+            "-b:a",
+            "128k",
+            "-movflags",
+            "+faststart",
+            str(main_output.name),
+        ]
+        proc_fast = subprocess.run(fast_cmd, cwd=input_video.parent, capture_output=True, text=True)
+        if proc_fast.returncode != 0:
+            raise RuntimeError(f"ffmpeg fallo en modo review rapido:\n{(proc_fast.stderr or '')[-1800:]}")
+        finalize_clip_with_outro(ffmpeg_bin, main_output, output_video, branded_outro, fast_render=True)
+        return
+
     intro_transition = (
         "[vpre]scale="
         "w='if(lt(t,0.70),1080*(1.08-0.08*t/0.70),1080)':"
@@ -1363,7 +1459,7 @@ def render_short(
 
     proc = subprocess.run(cmd, cwd=input_video.parent, capture_output=True, text=True)
     if proc.returncode == 0:
-        finalize_clip_with_outro(ffmpeg_bin, main_output, output_video, branded_outro)
+        finalize_clip_with_outro(ffmpeg_bin, main_output, output_video, branded_outro, fast_render=False)
         return
 
     # Fallback for constrained hosts (Railway-like): lower resolution + lighter encode.
@@ -1448,7 +1544,7 @@ def render_short(
             f"-- normal rc={proc.returncode} --\n{(proc.stderr or '')[-1800:]}\n"
             f"-- fallback rc={proc_fb.returncode} --\n{(proc_fb.stderr or '')[-1800:]}"
         )
-    finalize_clip_with_outro(ffmpeg_bin, main_output, output_video, branded_outro)
+    finalize_clip_with_outro(ffmpeg_bin, main_output, output_video, branded_outro, fast_render=True)
 
 
 def upload_to_tiktok_playwright(
