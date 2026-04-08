@@ -437,6 +437,9 @@
           <button class="btn secondary" id="planBtn" style="margin-top: 10px">Planificar hoy</button>
           <div id="planStatus" class="status">Todavia no hay plan diario.</div>
           <div id="planList" class="list"></div>
+          <button class="btn secondary" id="planTelegramBtn" style="margin-top: 10px">Preparar revisiones Telegram</button>
+          <div id="planBatchStatus" class="status">Todavia no hay batch diario.</div>
+          <div id="planBatchList" class="list"></div>
         </aside>
 
         <section class="panel">
@@ -484,8 +487,11 @@
         jobId: "",
         lastResult: null,
         dailyPlan: null,
+        dailyBatchId: "",
+        dailyBatch: null,
         logCursor: 0,
         pollTimer: null,
+        batchPollTimer: null,
         pollFailures: 0,
         pollInFlight: false,
         pollFailureLimit: 600,
@@ -500,8 +506,10 @@
         healthStatus: $("healthStatus"),
         discoverStatus: $("discoverStatus"),
         planStatus: $("planStatus"),
+        planBatchStatus: $("planBatchStatus"),
         candidateList: $("candidateList"),
         planList: $("planList"),
+        planBatchList: $("planBatchList"),
         urlInput: $("urlInput"),
         jobStatus: $("jobStatus"),
         jobLogs: $("jobLogs"),
@@ -787,6 +795,100 @@
           );
         } catch (err) {
           setStatus(ui.planStatus, `Error plan diario: ${err.message}`, true);
+        }
+      }
+
+      function renderDailyBatch(batch) {
+        state.dailyBatch = batch || null;
+        ui.planBatchList.innerHTML = "";
+        const items = Array.isArray(batch?.items) ? batch.items : [];
+        if (!items.length) {
+          return;
+        }
+        items.forEach((item, idx) => {
+          const row = document.createElement("div");
+          row.className = "item";
+          const title = String(item.source_title || `Clip ${idx + 1}`);
+          const status = String(item.status || "pending");
+          const meta = [
+            item.slot_label || `Slot ${idx + 1}`,
+            item.publish_time || "",
+            item.source_channel || "",
+            status
+          ].filter(Boolean).join(" | ");
+          const extra = item.error
+            ? escapeHtml(item.error)
+            : (item.telegram_message_id ? `Telegram ${escapeHtml(String(item.telegram_message_id))}` : "");
+          row.innerHTML = `
+            <div class="slot">${escapeHtml(item.slot_label || "Slot")} ${item.publish_time ? `| ${escapeHtml(item.publish_time)}` : ""}</div>
+            <div class="title">${escapeHtml(title)}</div>
+            <div class="meta">${escapeHtml(meta)}</div>
+            ${extra ? `<div class="meta">${extra}</div>` : ""}
+          `;
+          row.onclick = () => {
+            if (item.source_url) {
+              ui.urlInput.value = item.source_url;
+              setStatus(ui.jobStatus, `Video cargado desde el batch: ${title}`, false);
+            }
+            if (item.preview_url) {
+              window.open(item.preview_url, "_blank", "noopener,noreferrer");
+            }
+          };
+          ui.planBatchList.appendChild(row);
+        });
+      }
+
+      function clearBatchPolling() {
+        if (state.batchPollTimer) {
+          clearInterval(state.batchPollTimer);
+          state.batchPollTimer = null;
+        }
+      }
+
+      async function pollDailyBatch() {
+        if (!state.dailyBatchId) {
+          clearBatchPolling();
+          return;
+        }
+        try {
+          const data = await api(`/api/plan/daily/reviews/${state.dailyBatchId}`, undefined, 30000);
+          renderDailyBatch(data);
+          const status = String(data?.status || "unknown");
+          const note = String(data?.notes || "").trim();
+          setStatus(ui.planBatchStatus, `Batch ${status}.${note ? ` ${note}` : ""}`, status.includes("failed"));
+          if (["completed", "partial_failed", "failed"].includes(status)) {
+            clearBatchPolling();
+          }
+        } catch (err) {
+          setStatus(ui.planBatchStatus, `Error batch diario: ${err.message}`, true);
+          clearBatchPolling();
+        }
+      }
+
+      async function createDailyReviewBatch() {
+        try {
+          clearBatchPolling();
+          setStatus(ui.planBatchStatus, "Preparando revisiones del plan para Telegram...", false);
+          const payload = {
+            mode: $("discoverMode").value || "creators_es",
+            per_channel_scan: readNumberInput("scanInput", 12),
+            max_results: Math.max(12, readNumberInput("limitInput", 12)),
+            this_week_only: Boolean($("weekOnly").checked),
+            posts_per_day: readNumberInput("planPostsInput", 4),
+            reserve_count: readNumberInput("planReserveInput", 2),
+            duration: readNumberInput("durationInput", 60),
+            stride: readNumberInput("strideInput", 10),
+            overlap_ratio: readNumberInput("overlapInput", 0.4),
+            language: "es"
+          };
+          const data = await api("/api/plan/daily/reviews", payload, 45000);
+          state.dailyBatchId = String(data.batch_id || "");
+          renderDailyBatch(data);
+          setStatus(ui.planBatchStatus, "Batch diario lanzado. Generando clips y enviando revisiones a Telegram...", false);
+          state.batchPollTimer = setInterval(pollDailyBatch, 5000);
+          pollDailyBatch();
+        } catch (err) {
+          setStatus(ui.planBatchStatus, `Error lanzando batch diario: ${err.message}`, true);
         }
       }
 
@@ -1114,6 +1216,7 @@
       $("checkTikTokBtn").onclick = checkTikTokAccount;
       $("discoverBtn").onclick = discover;
       $("planBtn").onclick = createDailyPlan;
+      $("planTelegramBtn").onclick = createDailyReviewBatch;
       $("generateBtn").onclick = createJob;
 
       (function init() {
