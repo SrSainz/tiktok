@@ -1021,15 +1021,22 @@ def render_short(
 ) -> None:
     clip_duration = max(0.15, segment.end - segment.start)
     fade_out_start = max(0.0, clip_duration - 0.16)
+    intro_transition = (
+        "[vpre]scale="
+        "w='if(lt(t,0.70),1080*(1.08-0.08*t/0.70),1080)':"
+        "h='if(lt(t,0.70),1920*(1.08-0.08*t/0.70),1920)':"
+        "eval=frame,crop=1080:1920[vzoom]"
+    )
     base_comp = (
         "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,"
         "crop=1080:1920,boxblur=22:12[bg];"
         "[0:v]scale=1080:1920:force_original_aspect_ratio=decrease,"
         "setsar=1,eq=contrast=1.05:saturation=1.10[fg];"
-        "[bg][fg]overlay=(W-w)/2:(H-h)/2[vbase]"
+        "[bg][fg]overlay=(W-w)/2:(H-h)/2[vpre]"
     )
     chains = [base_comp]
-    current_label = "[vbase]"
+    chains.append(intro_transition)
+    current_label = "[vzoom]"
     if subtitle_ass and subtitle_ass.exists():
         chains.append(f"{current_label}ass='{ass_filter_path(subtitle_ass)}'[vsub]")
         current_label = "[vsub]"
@@ -1103,14 +1110,21 @@ def render_short(
 
     # Fallback for constrained hosts (Railway-like): lower resolution + lighter encode.
     fb_fade_out_start = max(0.0, clip_duration - 0.16)
+    fallback_intro = (
+        "[vpre]scale="
+        "w='if(lt(t,0.60),720*(1.07-0.07*t/0.60),720)':"
+        "h='if(lt(t,0.60),1280*(1.07-0.07*t/0.60),1280)':"
+        "eval=frame,crop=720:1280[vzoom]"
+    )
     fallback_comp = (
         "[0:v]scale=720:1280:force_original_aspect_ratio=increase,"
         "crop=720:1280,boxblur=18:10[bg];"
         "[0:v]scale=720:1280:force_original_aspect_ratio=decrease,setsar=1[fg];"
-        "[bg][fg]overlay=(W-w)/2:(H-h)/2[vbase]"
+        "[bg][fg]overlay=(W-w)/2:(H-h)/2[vpre]"
     )
     fallback_chains = [fallback_comp]
-    fallback_label = "[vbase]"
+    fallback_chains.append(fallback_intro)
+    fallback_label = "[vzoom]"
     if subtitle_ass and subtitle_ass.exists():
         fallback_chains.append(f"{fallback_label}ass='{ass_filter_path(subtitle_ass)}'[vsub]")
         fallback_label = "[vsub]"

@@ -988,7 +988,7 @@ def summarize_transcript_preview(cues: List[CaptionCue], max_chars: int = 180) -
     trimmed = text[: max_chars - 1]
     if " " in trimmed:
         trimmed = trimmed.rsplit(" ", 1)[0]
-    return f"{trimmed}â€¦"
+    return f"{trimmed}..."
 
 
 def build_signal_tags(
@@ -998,11 +998,14 @@ def build_signal_tags(
     question_hits: int,
     exclaim_hits: int,
     number_hits: int,
+    opening_hook_score: float,
     audio_score: float,
     visual_score: float,
     scene_cut_count: int,
 ) -> List[str]:
     tags: List[str] = []
+    if opening_hook_score >= 7.5:
+        tags.append("Hook fuerte")
     if question_hits > 0:
         tags.append("Pregunta")
     if number_hits > 0:
@@ -1196,6 +1199,18 @@ def window_score(
     question_rate = question_hits / duration
     opening_cues = [cue for cue in in_window if cue.start < start + min(6.0, duration * 0.28)]
     opening_hook_score = max((score_text(cue.text) for cue in opening_cues), default=0.0)
+    opening_blob = " ".join(cue.text for cue in opening_cues[:4])
+    opening_focus_text = extract_hook_focus_text(opening_blob)
+    opening_focus_bonus = 0.0
+    if opening_focus_text:
+        focus_tokens = re.findall(r"\w+", opening_focus_text, flags=re.UNICODE)
+        opening_focus_bonus += min(14.0, len(focus_tokens) * 3.2)
+        if any(token.isdigit() for token in focus_tokens):
+            opening_focus_bonus += 4.0
+        if " o " in f" {opening_focus_text.lower()} ":
+            opening_focus_bonus += 4.0
+    opening_word_count = len(re.findall(r"\w+", opening_blob, flags=re.UNICODE))
+    opening_density = opening_word_count / max(1.0, min(4.0, duration))
     dead_air_start = max(0.0, min(4.0, in_window[0].start - start))
     dead_air_end = max(0.0, min(4.0, end - in_window[-1].end))
 
@@ -1206,6 +1221,8 @@ def window_score(
         + interest_hits * 1.8
         + punctuation_bonus * 0.35
         + opening_hook_score * 2.2
+        + opening_focus_bonus * 1.5
+        + opening_density * 3.5
     )
     reach_score = (
         speech_density * 9.5
@@ -1215,17 +1232,21 @@ def window_score(
         + impact_rate * 6.0
         + exclaim_hits * 0.2
         + opening_hook_score * 1.4
+        + opening_focus_bonus * 1.2
+        + opening_density * 2.8
     )
     audio_score = window_audio_score(rms_by_second or {}, start, end)
     visual_score = window_visual_score(scene_times or [], start, end)
     scene_cut_count = window_scene_cut_count(scene_times or [], start, end)
     combined = (
-        interest_score * 0.46
-        + reach_score * 0.33
+        interest_score * 0.44
+        + reach_score * 0.31
         + audio_score * 0.12
         + visual_score * 0.09
+        + opening_hook_score * 1.3
+        + opening_focus_bonus * 1.1
     )
-    combined -= dead_air_start * 6.5
+    combined -= dead_air_start * 8.5
     combined -= dead_air_end * 3.0
     short_desc, why = _description_from_cues(in_window)
     topic_tokens = extract_topic_tokens(in_window)
@@ -1236,6 +1257,7 @@ def window_score(
         question_hits=question_hits,
         exclaim_hits=exclaim_hits,
         number_hits=number_hits,
+        opening_hook_score=opening_hook_score,
         audio_score=audio_score,
         visual_score=visual_score,
         scene_cut_count=scene_cut_count,
@@ -1244,6 +1266,8 @@ def window_score(
         why = f"{why} Audio con energia alta."
     if visual_score >= 55.0:
         why = f"{why} Ritmo visual dinamico."
+    if opening_focus_bonus >= 9.0 or opening_hook_score >= 8.0:
+        why = f"{why} Entra con hook claro en los primeros segundos."
     if signal_tags:
         why = f"{why} Senales: {', '.join(signal_tags)}."
     return WindowAnalysis(
@@ -1389,6 +1413,7 @@ def build_candidate_segments(
                         question_hits=0,
                         exclaim_hits=0,
                         number_hits=0,
+                        opening_hook_score=0.0,
                         audio_score=audio_score,
                         visual_score=visual_score,
                         scene_cut_count=window_scene_cut_count(scene_times or [], start, end),
