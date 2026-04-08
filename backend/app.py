@@ -800,6 +800,25 @@ def _update_daily_batch_item(batch_id: str, slot_key: str, **updates: Any) -> No
 
 
 def _serialize_daily_batch(batch: dict[str, Any]) -> dict[str, Any]:
+    items: list[dict[str, Any]] = []
+    with _jobs_lock:
+        jobs_snapshot = {
+            job_id: {
+                "status": job.get("status"),
+                "logs": list(job.get("logs", []))[-4:],
+                "error": job.get("error"),
+            }
+            for job_id, job in _jobs.items()
+        }
+    for item in batch.get("items", []):
+        enriched = dict(item)
+        job_id = str(enriched.get("job_id") or "").strip()
+        if job_id and job_id in jobs_snapshot:
+            job = jobs_snapshot[job_id]
+            enriched["job_status"] = job.get("status")
+            enriched["job_logs_tail"] = job.get("logs", [])
+            enriched["job_error"] = job.get("error")
+        items.append(enriched)
     return {
         "batch_id": batch["batch_id"],
         "status": batch["status"],
@@ -810,7 +829,7 @@ def _serialize_daily_batch(batch: dict[str, Any]) -> dict[str, Any]:
         "reserve_count": batch.get("reserve_count"),
         "notes": batch.get("notes"),
         "plan": batch.get("plan"),
-        "items": batch.get("items", []),
+        "items": items,
         "logs": batch.get("logs", []),
         "error": batch.get("error"),
     }

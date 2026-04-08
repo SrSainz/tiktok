@@ -810,20 +810,27 @@
           row.className = "item";
           const title = String(item.source_title || `Clip ${idx + 1}`);
           const status = String(item.status || "pending");
+          const jobStatus = String(item.job_status || "").trim();
+          const logTail = Array.isArray(item.job_logs_tail) ? item.job_logs_tail.slice(-2) : [];
           const meta = [
             item.slot_label || `Slot ${idx + 1}`,
             item.publish_time || "",
             item.source_channel || "",
-            status
+            status,
+            jobStatus && jobStatus !== status ? `job ${jobStatus}` : ""
           ].filter(Boolean).join(" | ");
           const extra = item.error
             ? escapeHtml(item.error)
             : (item.telegram_message_id ? `Telegram ${escapeHtml(String(item.telegram_message_id))}` : "");
+          const logsHtml = logTail.length
+            ? `<div class="meta">${logTail.map((line) => escapeHtml(String(line))).join("<br>")}</div>`
+            : "";
           row.innerHTML = `
             <div class="slot">${escapeHtml(item.slot_label || "Slot")} ${item.publish_time ? `| ${escapeHtml(item.publish_time)}` : ""}</div>
             <div class="title">${escapeHtml(title)}</div>
             <div class="meta">${escapeHtml(meta)}</div>
             ${extra ? `<div class="meta">${extra}</div>` : ""}
+            ${logsHtml}
           `;
           row.onclick = () => {
             if (item.source_url) {
