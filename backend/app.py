@@ -108,7 +108,7 @@ TIKTOK_BROWSER_PROFILE_DIRECTORY = os.getenv("TIKTOK_BROWSER_PROFILE_DIRECTORY",
 TIKTOK_BROWSER_TIMEOUT_SEC = int(os.getenv("TIKTOK_BROWSER_TIMEOUT_SEC", "900").strip() or "900")
 APP_TIMEZONE = os.getenv("APP_TIMEZONE", "Europe/Madrid").strip() or "Europe/Madrid"
 SCHEDULER_ENABLED = os.getenv("DAILY_REVIEW_SCHEDULER_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
-SCHEDULER_SLOT_TIMES_RAW = os.getenv("DAILY_REVIEW_SLOT_TIMES", "13:30,18:30,21:30,23:00").strip()
+SCHEDULER_SLOT_TIMES_RAW = os.getenv("DAILY_REVIEW_SLOT_TIMES", "09:30,13:30,18:30,21:30,23:00").strip()
 SCHEDULER_PREP_MINUTES = int(os.getenv("DAILY_REVIEW_PREP_MINUTES", "20").strip() or "20")
 SCHEDULER_PER_CHANNEL_SCAN = int(os.getenv("DAILY_REVIEW_PER_CHANNEL_SCAN", "12").strip() or "12")
 SCHEDULER_MAX_RESULTS = int(os.getenv("DAILY_REVIEW_MAX_RESULTS", "18").strip() or "18")
@@ -155,7 +155,7 @@ def _parse_scheduler_slot_times(raw: str) -> list[str]:
     return [value for _, value in parsed]
 
 
-SCHEDULER_SLOT_TIMES = _parse_scheduler_slot_times(SCHEDULER_SLOT_TIMES_RAW) or ["13:30", "18:30", "21:30", "23:00"]
+SCHEDULER_SLOT_TIMES = _parse_scheduler_slot_times(SCHEDULER_SLOT_TIMES_RAW) or ["09:30", "13:30", "18:30", "21:30", "23:00"]
 
 
 def _cookie_file_is_usable(path: str) -> bool:
