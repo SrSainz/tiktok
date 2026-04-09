@@ -12,6 +12,7 @@ Exposes:
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -121,6 +122,9 @@ SCHEDULER_OPTIONS_PER_SLOT = int(os.getenv("DAILY_REVIEW_OPTIONS_PER_SLOT", "3")
 SCHEDULER_LANGUAGE = os.getenv("DAILY_REVIEW_LANGUAGE", "es").strip() or "es"
 SCHEDULER_MODE = os.getenv("DAILY_REVIEW_MODE", "creators_es").strip() or "creators_es"
 SCHEDULER_STATE_FILE = WORK_DIR / "daily_review_scheduler_state.json"
+RETENTION_ENABLED = os.getenv("GENERATED_MEDIA_RETENTION_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
+RETENTION_HOURS = max(1, int(os.getenv("GENERATED_MEDIA_RETENTION_HOURS", "24").strip() or "24"))
+RETENTION_INTERVAL_MINUTES = max(5, int(os.getenv("GENERATED_MEDIA_RETENTION_INTERVAL_MINUTES", "60").strip() or "60"))
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 WORK_DIR.mkdir(parents=True, exist_ok=True)
 TIKTOK_VERIFICATION_DIR.mkdir(parents=True, exist_ok=True)
@@ -296,6 +300,17 @@ _scheduler_state: dict[str, Any] = {
     "next_trigger_at": None,
     "last_batch_id": None,
 }
+_cleanup_lock = threading.Lock()
+_cleanup_thread_started = False
+_cleanup_state: dict[str, Any] = {
+    "last_run_at": None,
+    "last_error": None,
+    "deleted_output_entries": 0,
+    "deleted_work_entries": 0,
+    "purged_jobs": 0,
+    "purged_publish_requests": 0,
+    "purged_daily_batches": 0,
+}
 
 
 def _local_now() -> datetime:
@@ -360,11 +375,152 @@ def _get_scheduler_status() -> dict[str, Any]:
     }
 
 
+def _parse_iso_datetime(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(value))
+    except Exception:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _is_payload_older_than(payload: dict[str, Any], cutoff: datetime) -> bool:
+    for key in ("updated_at", "created_at"):
+        dt = _parse_iso_datetime(payload.get(key))
+        if dt is not None:
+            return dt < cutoff
+    return False
+
+
+def _path_last_modified_ts(path: Path) -> float:
+    latest = path.stat().st_mtime
+    if not path.is_dir():
+        return latest
+    for root, dirs, files in os.walk(path):
+        for name in dirs:
+            try:
+                latest = max(latest, (Path(root) / name).stat().st_mtime)
+            except Exception:
+                continue
+        for name in files:
+            try:
+                latest = max(latest, (Path(root) / name).stat().st_mtime)
+            except Exception:
+                continue
+    return latest
+
+
+def _delete_old_entries(root: Path, cutoff_ts: float) -> int:
+    deleted = 0
+    if not root.exists():
+        return deleted
+    for child in root.iterdir():
+        try:
+            if _path_last_modified_ts(child) >= cutoff_ts:
+                continue
+            if child.is_dir():
+                shutil.rmtree(child, ignore_errors=False)
+            else:
+                child.unlink(missing_ok=True)
+            deleted += 1
+        except FileNotFoundError:
+            continue
+    return deleted
+
+
+def _purge_old_memory(cutoff: datetime) -> dict[str, int]:
+    purged = {"jobs": 0, "publish_requests": 0, "daily_batches": 0}
+
+    with _jobs_lock:
+        removable = [
+            job_id
+            for job_id, payload in _jobs.items()
+            if payload.get("status") not in {"queued", "pending", "running"}
+            and _is_payload_older_than(payload, cutoff)
+        ]
+        for job_id in removable:
+            _jobs.pop(job_id, None)
+        purged["jobs"] = len(removable)
+
+    with _publish_lock:
+        removable = [
+            request_id
+            for request_id, payload in _publish_requests.items()
+            if payload.get("status") not in {"pending_review", "publishing"}
+            and _is_payload_older_than(payload, cutoff)
+        ]
+        for request_id in removable:
+            _publish_requests.pop(request_id, None)
+        purged["publish_requests"] = len(removable)
+
+    with _daily_batches_lock:
+        removable = [
+            batch_id
+            for batch_id, payload in _daily_review_batches.items()
+            if payload.get("status") not in {"queued", "running"}
+            and _is_payload_older_than(payload, cutoff)
+        ]
+        for batch_id in removable:
+            _daily_review_batches.pop(batch_id, None)
+        purged["daily_batches"] = len(removable)
+
+    return purged
+
+
+def _run_retention_cleanup() -> None:
+    now_utc = datetime.now(timezone.utc)
+    cutoff = now_utc - timedelta(hours=RETENTION_HOURS)
+    cutoff_ts = cutoff.timestamp()
+    deleted_output_entries = _delete_old_entries(OUTPUT_DIR, cutoff_ts)
+    deleted_work_entries = _delete_old_entries(WORK_DIR, cutoff_ts)
+    purged = _purge_old_memory(cutoff)
+    with _cleanup_lock:
+        _cleanup_state.update(
+            {
+                "last_run_at": now_utc.isoformat(),
+                "last_error": None,
+                "deleted_output_entries": deleted_output_entries,
+                "deleted_work_entries": deleted_work_entries,
+                "purged_jobs": purged["jobs"],
+                "purged_publish_requests": purged["publish_requests"],
+                "purged_daily_batches": purged["daily_batches"],
+            }
+        )
+
+
+def _retention_cleanup_loop() -> None:
+    while True:
+        try:
+            if RETENTION_ENABLED:
+                _run_retention_cleanup()
+        except Exception as exc:
+            with _cleanup_lock:
+                _cleanup_state.update(
+                    {
+                        "last_run_at": datetime.now(timezone.utc).isoformat(),
+                        "last_error": str(exc),
+                    }
+                )
+        threading.Event().wait(RETENTION_INTERVAL_MINUTES * 60)
+
+
+def _ensure_retention_cleanup_started() -> None:
+    global _cleanup_thread_started
+    if _cleanup_thread_started or not RETENTION_ENABLED:
+        return
+    _cleanup_thread_started = True
+    threading.Thread(target=_retention_cleanup_loop, daemon=True).start()
+
+
 @app.on_event("startup")
 def _startup_tasks() -> None:
     _load_scheduler_state()
     _ensure_telegram_poller_started()
     _ensure_daily_review_scheduler_started()
+    _ensure_retention_cleanup_started()
 
 
 def _safe_rel_to_output(file_path: str) -> str | None:
@@ -1801,6 +1957,8 @@ def _run_job(job_id: str, req: CreateJobRequest) -> None:
 @app.get("/api/health")
 def health() -> dict[str, Any]:
     scheduler = _get_scheduler_status()
+    with _cleanup_lock:
+        cleanup = dict(_cleanup_state)
     return {
         "ok": True,
         "service": "clip-studio-es-api",
@@ -1824,6 +1982,13 @@ def health() -> dict[str, Any]:
         "scheduler_prep_minutes": scheduler["prep_minutes"],
         "scheduler_next_trigger_at": scheduler["state"].get("next_trigger_at"),
         "scheduler_last_error": scheduler["state"].get("last_error"),
+        "retention_enabled": RETENTION_ENABLED,
+        "retention_hours": RETENTION_HOURS,
+        "retention_interval_minutes": RETENTION_INTERVAL_MINUTES,
+        "retention_last_run_at": cleanup.get("last_run_at"),
+        "retention_last_error": cleanup.get("last_error"),
+        "retention_deleted_output_entries": cleanup.get("deleted_output_entries"),
+        "retention_deleted_work_entries": cleanup.get("deleted_work_entries"),
     }
 
 
