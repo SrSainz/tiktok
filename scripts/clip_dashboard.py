@@ -1426,6 +1426,19 @@ def _exclude_recently_used_candidates(
     return fresh + [candidate for candidate in candidates if _candidate_video_key(candidate) in recent_keys]
 
 
+def _dedupe_candidates_by_video(candidates: List[VideoCandidate]) -> List[VideoCandidate]:
+    seen: set[str] = set()
+    deduped: List[VideoCandidate] = []
+    for candidate in candidates:
+        key = _candidate_video_key(candidate)
+        if key and key in seen:
+            continue
+        if key:
+            seen.add(key)
+        deduped.append(candidate)
+    return deduped
+
+
 def build_daily_post_plan(
     *,
     channels: List[str] | None = None,
@@ -1464,11 +1477,44 @@ def build_daily_post_plan(
         }
 
     minimum_needed = max(posts_per_day * slot_option_count, posts_per_day + reserve_count)
-    candidates = _exclude_recently_used_candidates(
-        candidates,
-        minimum_needed=minimum_needed,
-        log_fn=log_fn,
-    )
+    recent_keys = recent_used_video_keys()
+    original_candidates = list(candidates)
+    if recent_keys:
+        fresh_candidates = [candidate for candidate in candidates if _candidate_video_key(candidate) not in recent_keys]
+        repeated = len(candidates) - len(fresh_candidates)
+        if log_fn:
+            log_fn(f"Excluyendo {repeated} videos usados recientemente de la planificacion.")
+        candidates = fresh_candidates
+
+    if len(candidates) < minimum_needed:
+        if log_fn:
+            log_fn(
+                "Variedad insuficiente tras excluir repetidos; ampliando la busqueda a videos recientes fuera de esta semana."
+            )
+        expanded_candidates = discover_creator_videos(
+            channels=channels,
+            per_channel_scan=max(per_channel_scan, 20),
+            this_week_only=False,
+            min_source_duration=min_source_duration,
+            max_results=max(max_results * 2, minimum_needed * 4, 40),
+            mode=mode,
+            log_fn=log_fn,
+        )
+        expanded_candidates = _dedupe_candidates_by_video(expanded_candidates)
+        if recent_keys:
+            expanded_candidates = [candidate for candidate in expanded_candidates if _candidate_video_key(candidate) not in recent_keys]
+        candidates = expanded_candidates
+
+    if len(candidates) < minimum_needed:
+        if log_fn:
+            log_fn(
+                "No habia suficientes candidatos frescos ni ampliando la ventana; reutilizando algunos repetidos como ultimo recurso."
+            )
+        candidates = _exclude_recently_used_candidates(
+            _dedupe_candidates_by_video(original_candidates + candidates),
+            minimum_needed=minimum_needed,
+            log_fn=None,
+        )
 
     used_channels: set[str] = set()
     planned: List[dict[str, Any]] = []
