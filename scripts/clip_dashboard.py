@@ -233,30 +233,49 @@ AI_HOOK_TERMS = {
 }
 
 TOPIC_HASHTAG_RULES = [
-    (("minecraft", "creeper", "survival", "mod"), ["#minecraft", "#gaming", "#clipenespanol"]),
-    (("roblox",), ["#roblox", "#gaming", "#clipenespanol"]),
-    (("clash", "clash royale", "brawl", "brawl stars"), ["#gaming", "#mobilegaming", "#clipenespanol"]),
-    (("fortnite",), ["#fortnite", "#gaming", "#clipenespanol"]),
-    (("velada", "boxeo", "combate"), ["#boxeo", "#velada", "#clipenespanol"]),
-    (("entrevista", "podcast", "charla"), ["#podcast", "#clips", "#clipenespanol"]),
-    (("historia", "curiosidad", "dato"), ["#curiosidades", "#datos", "#clipenespanol"]),
+    (("mi vida", "ultimamente", "últimamente", "estos dias", "estos días", "update"), ["#vlog", "#update", "#storytime"]),
+    (("minecraft", "creeper", "survival", "mod"), ["#minecraft", "#gaming", "#survival"]),
+    (("roblox",), ["#roblox", "#gaming", "#juegos"]),
+    (("clash", "clash royale", "brawl", "brawl stars"), ["#gaming", "#mobilegaming", "#juegos"]),
+    (("fortnite",), ["#fortnite", "#gaming", "#juegos"]),
+    (("fifa", "fc 25", "fc25", "fut", "gol"), ["#futbol", "#gaming", "#fc25"]),
+    (("velada", "boxeo", "combate"), ["#boxeo", "#velada", "#combate"]),
+    (("entrevista", "podcast", "charla"), ["#podcast", "#entrevista", "#clips"]),
+    (("historia", "curiosidad", "dato"), ["#curiosidades", "#datos", "#storytime"]),
+    (("viaje", "viaj", "hong kong", "china", "india", "japon", "tokio", "corea"), ["#viajes", "#vlog", "#curiosidades"]),
+    (("mcdonald", "comida", "restaurante", "kebab", "pizza", "burger"), ["#comida", "#vlog", "#curiosidades"]),
+    (("coche", "regale", "regalé", "sueños", "suenos"), ["#regalo", "#vlog", "#momentazo"]),
+    (("reto", "24 horas", "24h", "supervivencia"), ["#reto", "#viral", "#momentazo"]),
+    (("dinero", "negocio", "empresa", "millon", "millonario"), ["#dinero", "#negocios", "#mentalidad"]),
 ]
 
 
 SIGNAL_HASHTAG_RULES = {
-    "Pregunta": ["#pregunta", "#debate"],
-    "Dato": ["#dato", "#curiosidad"],
-    "Impacto": ["#momentazo", "#impactante"],
-    "Mucho texto": ["#storytime", "#clipenespanol"],
+    "Pregunta": ["#debate", "#opinion"],
+    "Dato": ["#curiosidades", "#datos"],
+    "Impacto": ["#momentazo", "#viral"],
+    "Mucho texto": ["#storytime"],
     "Audio alto": ["#reaccion", "#momentazo"],
-    "Audio estable": ["#clipenespanol"],
-    "Cambio escena": ["#momento", "#clipenespanol"],
-    "Ritmo visual": ["#satisfying", "#clipenespanol"],
-    "Buen audio": ["#audio", "#clipenespanol"],
-    "Momento claro": ["#clipenespanol"],
+    "Audio estable": [],
+    "Cambio escena": ["#momentazo"],
+    "Ritmo visual": [],
+    "Buen audio": [],
+    "Momento claro": [],
 }
 
-BASE_TIKTOK_HASHTAGS = ["#clipenespanol"]
+BASE_TIKTOK_HASHTAGS: list[str] = []
+
+THEME_REACTION_RULES = [
+    (("mi vida", "ultimamente", "últimamente", "estos dias", "estos días", "update"), "Es el típico resumen en el que te das cuenta de que le han pasado demasiadas cosas seguidas."),
+    (("mcdonald", "comida", "restaurante", "kebab", "pizza", "burger"), "No sé si me daría antojo o curiosidad ver esto en persona."),
+    (("viaje", "hong kong", "china", "india", "japon", "tokio", "corea"), "Es de esos vídeos que te hacen mirar dos veces cómo vive la gente allí."),
+    (("coche", "regale", "regalé", "sueños", "suenos"), "Es el tipo de regalo que se te va de las manos en el mejor sentido."),
+    (("reto", "24 horas", "24h", "supervivencia"), "Aquí se nota enseguida que la cosa va a ir escalando."),
+    (("entrevista", "podcast", "charla"), "Hay un momento de charla que te deja escuchando hasta el final."),
+    (("minecraft", "roblox", "fortnite", "clash", "brawl", "fifa", "fc25"), "Si juegas a esto, ya sabes que aquí venía drama del bueno."),
+    (("boxeo", "velada", "combate"), "Tiene pinta de momento para comentarlo entero con amigos."),
+    (("dinero", "negocio", "empresa", "millon", "millonario"), "Aquí hay un detalle que te hace replantearte la historia."),
+]
 
 SOCIAL_BAD_EDGE_WORDS = {
     "a",
@@ -528,6 +547,50 @@ def _build_caption_cta(signal_tags: List[str], hook: str, why_it_may_work: str) 
     return "Tiene ese punto que te hace quedarte."
 
 
+def _build_caption_reaction(
+    *,
+    source_title: str,
+    hook: str,
+    short_description: str,
+    transcript_preview: str,
+    signal_tags: List[str],
+) -> str:
+    haystack = " ".join(
+        _clean_social_text(text, allow_punctuation=False).lower()
+        for text in (source_title, hook, short_description, transcript_preview)
+        if text
+    ).strip()
+    for keywords, reaction in THEME_REACTION_RULES:
+        if any(keyword in haystack for keyword in keywords):
+            return reaction
+    if "Pregunta" in signal_tags:
+        return "Yo aquí habría discutido esto un buen rato."
+    if "Dato" in signal_tags:
+        return "Lo mejor es el detalle que sueltan casi sin avisar."
+    if "Impacto" in signal_tags:
+        return "Se nota rápido que aquí viene un momentazo."
+    return "Tiene ese punto de resumen rápido que entra fácil y deja tema."
+
+
+def _build_thematic_summary(
+    *,
+    title: str,
+    source_title: str,
+    short_description: str,
+) -> str:
+    pieces = _extract_social_snippets(f"{title}. {short_description}. {source_title}")
+    for piece in pieces:
+        clean = _truncate_copy(_strip_clip_prefix(piece), 90).rstrip(" .")
+        if not clean or _looks_fragmentary_social_lead(clean):
+            continue
+        if _norm_text(clean) == _norm_text(title):
+            continue
+        if len(_social_tokens(clean)) < 3:
+            continue
+        return _sentence_case(clean)
+    return ""
+
+
 def _source_channel_line(source_channel: str, title: str) -> str:
     channel = _clean_social_text(source_channel, allow_punctuation=False).strip()
     if not channel:
@@ -677,8 +740,10 @@ def _score_social_title_candidate(text: str, *, signal_tags: List[str], source_t
         score -= 6.0
 
     if _norm_text(clean) == _norm_text(source_title):
-        score -= 4.0
+        score += 8.0
     if clean.lower().startswith(("estamos", "claro", "bueno", "nada", "pues", "vale")):
+        score -= 10.0
+    if re.search(r"\b(tiene|incluye|entra|audio|ritmo|visual|senales|señales|detalle|resumen rapido)\b", clean.lower()):
         score -= 10.0
     return score
 
@@ -692,6 +757,10 @@ def _select_social_title(
     transcript_preview: str,
     signal_tags: List[str],
 ) -> str:
+    natural_source_title = _truncate_copy(_strip_clip_prefix(source_title or ""), 72)
+    if natural_source_title and len(_social_tokens(natural_source_title)) >= 2:
+        return natural_source_title
+
     focus_title = _strip_clip_prefix(extract_hook_focus_text(f"{short_description}. {transcript_preview}. {hook}"))
     raw_candidates: List[str] = []
     for text in (hook, focus_title, short_description, transcript_preview, why_it_may_work, source_title):
@@ -741,10 +810,23 @@ def build_tiktok_copy(
     if title and title[-1] not in "!?" and (len(title.split()) > 3 or len(title) > 28):
         title = f"{title}..."
 
-    caption_parts = [title] if title else []
-    cta_line = _build_caption_cta(signal_tags, hook, why_it_may_work)
-    if cta_line and _norm_text(cta_line) not in _norm_text(" ".join(caption_parts)):
-        caption_parts.append(cta_line)
+    summary_line = _build_thematic_summary(
+        title=title,
+        source_title=source_title,
+        short_description=short_description,
+    )
+    reaction_line = _build_caption_reaction(
+        source_title=source_title,
+        hook=hook,
+        short_description=short_description,
+        transcript_preview=transcript_preview,
+        signal_tags=signal_tags,
+    )
+    caption_parts: List[str] = []
+    if summary_line:
+        caption_parts.append(summary_line)
+    if reaction_line and _norm_text(reaction_line) not in _norm_text(" ".join(caption_parts)):
+        caption_parts.append(reaction_line)
     source_line = _source_channel_line(source_channel, title)
     if source_line and _norm_text(source_line) not in _norm_text(" ".join(caption_parts)):
         caption_parts.append(source_line)
@@ -769,9 +851,8 @@ def build_tiktok_copy(
     )
     channel_hashtag = _channel_hashtag(source_channel)
     if channel_hashtag and channel_hashtag not in hashtags:
-        hashtags = [channel_hashtag, *hashtags][:3]
-    else:
-        hashtags = hashtags[:3]
+        hashtags = [channel_hashtag, *hashtags]
+    hashtags = _dedupe_keep_order(hashtags)[:4]
     return title, caption, hashtags
 
 
