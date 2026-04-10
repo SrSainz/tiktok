@@ -45,17 +45,26 @@ from youtube_tiktok_pipeline import (
 )
 
 DEFAULT_CREATOR_CHANNELS = [
-    "https://www.youtube.com/@TheGrefg/videos",
-    "https://www.youtube.com/@AuronPlay/videos",
-    "https://www.youtube.com/@Ibai/videos",
     "https://www.youtube.com/@YoSoyPlex/videos",
+    "https://www.youtube.com/@nilojeda/videos",
+    "https://www.youtube.com/@hiclavero/videos",
+    "https://www.youtube.com/@pedrobuerbaum/videos",
+    "https://www.youtube.com/@ibaillanos/videos",
+    "https://www.youtube.com/@AuronPlay/videos",
+    "https://www.youtube.com/@illojuan_/videos",
+    "https://www.youtube.com/@TheGrefg/videos",
     "https://www.youtube.com/@elrubiusOMG/videos",
-    "https://www.youtube.com/@Dagar/videos",
-    "https://www.youtube.com/@Lyna/videos",
-    "https://www.youtube.com/@illojuan/videos",
-    "https://www.youtube.com/@JordiWild/videos",
+    "https://www.youtube.com/@willyrex/videos",
+    "https://www.youtube.com/@djmariio/videos",
+    "https://www.youtube.com/@xbuyer/videos",
     "https://www.youtube.com/@byViruZz/videos",
+    "https://www.youtube.com/@TheWildProject/videos",
 ]
+
+DEFAULT_CREATOR_SEARCH_QUERY = (
+    "YoSoyPlex Nil Ojeda Hiclavero Pedro Buerbaum Ibai AuronPlay illojuan "
+    "TheGrefg elrubiusOMG Willyrex DjMaRiiO xBuyer byViruZz Jordi Wild"
+)
 
 DISCOVERY_MODES = {"viral_es", "creators_es"}
 
@@ -854,6 +863,14 @@ def discover_creator_videos(
     yt_trend_categories = [x.strip() for x in os.getenv("YOUTUBE_TREND_CATEGORY_IDS", "").split(",") if x.strip()]
     used_charts = False
 
+    if mode == "creators_es":
+        _log("Usando un pool curado de creadores espanoles actuales para clips: gaming, stream, videoblog, viaje y charla.")
+        _log(f"Escaneando {len(channels)} canales curados...")
+        candidates = discover_from_channels(channels, per_channel_scan=max(8, min(per_channel_scan, 18)))
+        candidates = _creator_mode_candidates(candidates, log_fn=_log)
+        # Fuerza Creadores ES a depender del pool curado y no de charts generales.
+        yt_api_key = ""
+
     if yt_api_key and mode in {"viral_es", "creators_es"}:
         try:
             if mode == "creators_es":
@@ -885,7 +902,7 @@ def discover_creator_videos(
         except Exception as exc:
             raise RuntimeError(f"YouTube Data API fallo en modo {mode}: {exc}") from exc
 
-    if mode == "creators_es" and len(candidates) < max_results:
+    if mode == "creators_es" and used_charts and len(candidates) < max_results:
         _log("Pool oficial de creadores escaso; completando con un pool curado de creadores españoles.")
         extra_channel_candidates = discover_from_channels(channels, per_channel_scan=max(6, min(per_channel_scan, 12)))
         seen_ids = {c.video_id for c in candidates if c.video_id}
@@ -901,10 +918,14 @@ def discover_creator_videos(
             _log(f"Sin charts ES disponibles para {mode}. Usando fallback por canales; los resultados ya no son charts oficiales.")
         _log(f"Escaneando {len(channels)} canales...")
         candidates = discover_from_channels(channels, per_channel_scan=per_channel_scan)
+        if mode == "creators_es":
+            candidates = _creator_mode_candidates(candidates, log_fn=_log)
     if not candidates:
         _log("Sin resultados por canales. Probando fallback de busqueda...")
-        search_q = "TheGrefg AuronPlay Ibai YoSoyPlex elrubius"
+        search_q = DEFAULT_CREATOR_SEARCH_QUERY if mode == "creators_es" else "TheGrefg AuronPlay Ibai YoSoyPlex elrubius"
         candidates = discover_from_search(search_q, search_limit=max(30, max_results * 4))
+        if mode == "creators_es":
+            candidates = _creator_mode_candidates(candidates, log_fn=_log)
     _log(f"Candidatos brutos: {len(candidates)}")
     enrich_limit = min(len(candidates), max(max_results * 2, 20))
     _log(f"Enriqueciendo metadatos de {enrich_limit} videos...")

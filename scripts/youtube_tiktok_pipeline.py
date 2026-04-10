@@ -40,11 +40,20 @@ if hasattr(sys.stdout, "reconfigure"):
 
 
 DEFAULT_ES_CHANNELS = [
-    "https://www.youtube.com/@Ibai/videos",
-    "https://www.youtube.com/@elrubiusOMG/videos",
-    "https://www.youtube.com/@VEGETTA777/videos",
+    "https://www.youtube.com/@YoSoyPlex/videos",
+    "https://www.youtube.com/@nilojeda/videos",
+    "https://www.youtube.com/@hiclavero/videos",
+    "https://www.youtube.com/@pedrobuerbaum/videos",
+    "https://www.youtube.com/@ibaillanos/videos",
     "https://www.youtube.com/@AuronPlay/videos",
-    "https://www.youtube.com/@Mikecrack/videos",
+    "https://www.youtube.com/@illojuan_/videos",
+    "https://www.youtube.com/@TheGrefg/videos",
+    "https://www.youtube.com/@elrubiusOMG/videos",
+    "https://www.youtube.com/@willyrex/videos",
+    "https://www.youtube.com/@djmariio/videos",
+    "https://www.youtube.com/@xbuyer/videos",
+    "https://www.youtube.com/@byViruZz/videos",
+    "https://www.youtube.com/@TheWildProject/videos",
 ]
 
 IMPACT_WORDS = {
