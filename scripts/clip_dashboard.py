@@ -18,7 +18,7 @@ import re
 import subprocess
 import sys
 from dataclasses import asdict, dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, List
 from zoneinfo import ZoneInfo
@@ -65,6 +65,14 @@ DEFAULT_CREATOR_SEARCH_QUERY = (
     "YoSoyPlex Nil Ojeda Hiclavero Pedro Buerbaum Ibai AuronPlay illojuan "
     "TheGrefg elrubiusOMG Willyrex DjMaRiiO xBuyer byViruZz Jordi Wild"
 )
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+USED_VIDEO_HISTORY_FILE = Path(
+    os.getenv("USED_VIDEO_HISTORY_FILE", str(REPO_ROOT / "data" / "used_videos.json"))
+).resolve()
+USED_VIDEO_COOLDOWN_HOURS = max(1, int(os.getenv("USED_VIDEO_COOLDOWN_HOURS", "72").strip() or "72"))
+USED_VIDEO_HISTORY_LIMIT = max(50, int(os.getenv("USED_VIDEO_HISTORY_LIMIT", "500").strip() or "500"))
+USED_VIDEO_HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
 
 DISCOVERY_MODES = {"viral_es", "creators_es"}
 
@@ -873,6 +881,166 @@ def _creator_mode_candidates(candidates: List[VideoCandidate], log_fn: Callable[
     return filtered
 
 
+def _extract_video_id_from_url(url: str) -> str:
+    raw = str(url or "").strip()
+    if not raw:
+        return ""
+    match = re.search(r"(?:v=|youtu\.be/)([A-Za-z0-9_-]{6,})", raw)
+    if match:
+        return match.group(1)
+    return ""
+
+
+def _candidate_video_key(candidate: VideoCandidate | dict[str, Any] | None = None, *, source_url: str = "", video_id: str = "") -> str:
+    candidate_video_id = ""
+    candidate_url = ""
+    candidate_title = ""
+    candidate_channel = ""
+    if candidate is not None:
+        if isinstance(candidate, dict):
+            candidate_video_id = str(candidate.get("video_id") or "").strip()
+            candidate_url = str(candidate.get("url") or "").strip()
+            candidate_title = str(candidate.get("title") or "").strip()
+            candidate_channel = str(candidate.get("channel") or "").strip()
+        else:
+            candidate_video_id = str(candidate.video_id or "").strip()
+            candidate_url = str(candidate.url or "").strip()
+            candidate_title = str(candidate.title or "").strip()
+            candidate_channel = str(candidate.channel or "").strip()
+
+    resolved_video_id = str(video_id or candidate_video_id or "").strip() or _extract_video_id_from_url(source_url or candidate_url)
+    if resolved_video_id:
+        return f"yt:{resolved_video_id}"
+
+    resolved_url = str(source_url or candidate_url or "").strip()
+    if resolved_url:
+        return f"url:{resolved_url.lower()}"
+
+    fallback = slugify(f"{candidate_channel}-{candidate_title}", max_len=80)
+    return f"fallback:{fallback}" if fallback else ""
+
+
+def _load_used_video_history() -> list[dict[str, Any]]:
+    cutoff_ts = (datetime.utcnow() - timedelta(hours=USED_VIDEO_COOLDOWN_HOURS)).timestamp()
+    entries: list[dict[str, Any]] = []
+    try:
+        if USED_VIDEO_HISTORY_FILE.exists():
+            payload = json.loads(USED_VIDEO_HISTORY_FILE.read_text(encoding="utf-8"))
+            if isinstance(payload, list):
+                for item in payload:
+                    if not isinstance(item, dict):
+                        continue
+                    video_key = str(item.get("video_key") or "").strip()
+                    used_at_raw = str(item.get("used_at") or "").strip()
+                    if not video_key or not used_at_raw:
+                        continue
+                    try:
+                        used_at = datetime.fromisoformat(used_at_raw.replace("Z", "+00:00"))
+                    except Exception:
+                        continue
+                    used_at_ts = used_at.timestamp()
+                    if used_at_ts < cutoff_ts:
+                        continue
+                    entries.append(
+                        {
+                            "video_key": video_key,
+                            "source_url": str(item.get("source_url") or "").strip(),
+                            "source_title": str(item.get("source_title") or "").strip(),
+                            "source_channel": str(item.get("source_channel") or "").strip(),
+                            "used_at": used_at.isoformat(),
+                            "context": str(item.get("context") or "").strip(),
+                        }
+                    )
+    except Exception:
+        return []
+    entries.sort(key=lambda item: item.get("used_at") or "", reverse=True)
+    return entries[:USED_VIDEO_HISTORY_LIMIT]
+
+
+def _save_used_video_history(entries: list[dict[str, Any]]) -> None:
+    trimmed = sorted(entries, key=lambda item: item.get("used_at") or "", reverse=True)[:USED_VIDEO_HISTORY_LIMIT]
+    USED_VIDEO_HISTORY_FILE.write_text(json.dumps(trimmed, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def recent_used_video_keys() -> set[str]:
+    entries = _load_used_video_history()
+    try:
+        _save_used_video_history(entries)
+    except Exception:
+        pass
+    return {str(item.get("video_key") or "").strip() for item in entries if str(item.get("video_key") or "").strip()}
+
+
+def record_used_video(
+    *,
+    source_url: str,
+    source_title: str = "",
+    source_channel: str = "",
+    video_id: str = "",
+    context: str = "telegram_review",
+) -> None:
+    video_key = _candidate_video_key(source_url=source_url, video_id=video_id)
+    if not video_key:
+        return
+
+    entries = [item for item in _load_used_video_history() if str(item.get("video_key") or "").strip() != video_key]
+    entries.insert(
+        0,
+        {
+            "video_key": video_key,
+            "source_url": str(source_url or "").strip(),
+            "source_title": str(source_title or "").strip(),
+            "source_channel": str(source_channel or "").strip(),
+            "used_at": datetime.utcnow().isoformat(),
+            "context": context,
+        },
+    )
+    _save_used_video_history(entries)
+
+
+def backfill_recent_used_videos_from_output(output_root: Path | None = None) -> int:
+    root = (output_root or (REPO_ROOT / "output")).resolve()
+    if not root.exists():
+        return 0
+
+    manifests = sorted(root.glob("*/options_manifest.json"), key=lambda path: path.stat().st_mtime, reverse=True)
+    cutoff = datetime.utcnow() - timedelta(hours=USED_VIDEO_COOLDOWN_HOURS)
+    history = [item for item in _load_used_video_history()]
+    existing_keys = {str(item.get("video_key") or "").strip() for item in history}
+    added = 0
+
+    for manifest_path in manifests:
+        try:
+            modified = datetime.utcfromtimestamp(manifest_path.stat().st_mtime)
+            if modified < cutoff:
+                continue
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+            source_url = str(payload.get("source_url") or "").strip()
+            source_title = str(payload.get("source_title") or "").strip()
+            source_channel = str(payload.get("source_channel") or "").strip()
+            video_key = _candidate_video_key(source_url=source_url)
+            if not video_key or video_key in existing_keys:
+                continue
+            history.append(
+                {
+                    "video_key": video_key,
+                    "source_url": source_url,
+                    "source_title": source_title,
+                    "source_channel": source_channel,
+                    "used_at": modified.isoformat(),
+                    "context": "output_backfill",
+                }
+            )
+            existing_keys.add(video_key)
+            added += 1
+        except Exception:
+            continue
+
+    if added:
+        _save_used_video_history(history)
+    return added
+
+
 def score_candidate_ai(c: VideoCandidate, today: date) -> tuple[float, str]:
     title = (c.title or "").lower()
     tokens = re.findall(r"[a-z0-9]+", title)
@@ -1232,6 +1400,32 @@ def _build_slot_alternatives(
     return alternatives
 
 
+def _exclude_recently_used_candidates(
+    candidates: List[VideoCandidate],
+    *,
+    minimum_needed: int,
+    log_fn: Callable[[str], None] | None = None,
+) -> List[VideoCandidate]:
+    recent_keys = recent_used_video_keys()
+    if not recent_keys:
+        return candidates
+
+    fresh = [candidate for candidate in candidates if _candidate_video_key(candidate) not in recent_keys]
+    repeated = len(candidates) - len(fresh)
+    if log_fn:
+        log_fn(f"Excluyendo {repeated} videos usados recientemente de la planificacion.")
+
+    if len(fresh) >= minimum_needed:
+        return fresh
+
+    if log_fn:
+        log_fn(
+            "No habia suficientes candidatos frescos para cubrir toda la tanda; "
+            "rellenando con algunos repetidos antiguos solo si hace falta."
+        )
+    return fresh + [candidate for candidate in candidates if _candidate_video_key(candidate) in recent_keys]
+
+
 def build_daily_post_plan(
     *,
     channels: List[str] | None = None,
@@ -1268,6 +1462,13 @@ def build_daily_post_plan(
             "reserves": [],
             "notes": "Sin candidatos suficientes para construir el plan de hoy.",
         }
+
+    minimum_needed = max(posts_per_day * slot_option_count, posts_per_day + reserve_count)
+    candidates = _exclude_recently_used_candidates(
+        candidates,
+        minimum_needed=minimum_needed,
+        log_fn=log_fn,
+    )
 
     used_channels: set[str] = set()
     planned: List[dict[str, Any]] = []
@@ -2514,7 +2715,9 @@ def generate_dashboard(config: DashboardConfig, log_fn: Callable[[str], None] = 
 
     manifest = {
         "source_title": source_title,
+        "source_channel": str(info.get("channel") or info.get("uploader") or ""),
         "source_url": info.get("webpage_url") or config.url,
+        "video_id": str(info.get("id") or candidate.video_id or ""),
         "source_duration": source_duration,
         "options": [asdict(o) for o in options],
     }

@@ -38,7 +38,15 @@ SCRIPTS_DIR = REPO_ROOT / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from clip_dashboard import DashboardConfig, build_daily_post_plan, discover_creator_videos, generate_dashboard  # noqa: E402
+from clip_dashboard import (  # noqa: E402
+    DashboardConfig,
+    backfill_recent_used_videos_from_output,
+    build_daily_post_plan,
+    discover_creator_videos,
+    generate_dashboard,
+    recent_used_video_keys,
+    record_used_video,
+)
 from tiktok_direct_post_api import (  # noqa: E402
     TikTokApiError,
     TikTokDesktopOAuth,
@@ -517,6 +525,7 @@ def _ensure_retention_cleanup_started() -> None:
 
 @app.on_event("startup")
 def _startup_tasks() -> None:
+    backfill_recent_used_videos_from_output(OUTPUT_DIR)
     _load_scheduler_state()
     _ensure_telegram_poller_started()
     _ensure_daily_review_scheduler_started()
@@ -1635,6 +1644,13 @@ def _run_daily_review_batch(batch_id: str, req: DailyReviewBatchRequest) -> None
                     request_id=request_id,
                     error=None,
                 )
+                record_used_video(
+                    source_url=source_url,
+                    source_title=source_title,
+                    source_channel=str(item.get("source_channel") or ""),
+                    video_id=str((option or {}).get("video_id") or ""),
+                    context=f"daily_batch:{batch_id}:{slot_key}",
+                )
                 _append_daily_batch_log(
                     batch_id,
                     f"Revision enviada a Telegram para {source_title} "
@@ -1959,6 +1975,7 @@ def health() -> dict[str, Any]:
     scheduler = _get_scheduler_status()
     with _cleanup_lock:
         cleanup = dict(_cleanup_state)
+    recent_used_count = len(recent_used_video_keys())
     return {
         "ok": True,
         "service": "clip-studio-es-api",
@@ -1989,6 +2006,7 @@ def health() -> dict[str, Any]:
         "retention_last_error": cleanup.get("last_error"),
         "retention_deleted_output_entries": cleanup.get("deleted_output_entries"),
         "retention_deleted_work_entries": cleanup.get("deleted_work_entries"),
+        "used_video_cooldown_active_count": recent_used_count,
     }
 
 
