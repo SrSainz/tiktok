@@ -71,6 +71,7 @@ USED_VIDEO_HISTORY_FILE = Path(
     os.getenv("USED_VIDEO_HISTORY_FILE", str(REPO_ROOT / "data" / "used_videos.json"))
 ).resolve()
 USED_VIDEO_COOLDOWN_HOURS = max(1, int(os.getenv("USED_VIDEO_COOLDOWN_HOURS", "72").strip() or "72"))
+USED_CREATOR_COOLDOWN_HOURS = max(1, int(os.getenv("USED_CREATOR_COOLDOWN_HOURS", "24").strip() or "24"))
 USED_VIDEO_HISTORY_LIMIT = max(50, int(os.getenv("USED_VIDEO_HISTORY_LIMIT", "500").strip() or "500"))
 USED_VIDEO_HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
 
@@ -971,6 +972,25 @@ def recent_used_video_keys() -> set[str]:
     return {str(item.get("video_key") or "").strip() for item in entries if str(item.get("video_key") or "").strip()}
 
 
+def recent_used_channel_keys() -> set[str]:
+    cutoff_ts = (datetime.utcnow() - timedelta(hours=USED_CREATOR_COOLDOWN_HOURS)).timestamp()
+    keys: set[str] = set()
+    for item in _load_used_video_history():
+        used_at_raw = str(item.get("used_at") or "").strip()
+        if not used_at_raw:
+            continue
+        try:
+            used_at = datetime.fromisoformat(used_at_raw.replace("Z", "+00:00"))
+        except Exception:
+            continue
+        if used_at.timestamp() < cutoff_ts:
+            continue
+        channel = str(item.get("source_channel") or "").strip().lower()
+        if channel:
+            keys.add(channel)
+    return keys
+
+
 def record_used_video(
     *,
     source_url: str,
@@ -1478,6 +1498,7 @@ def build_daily_post_plan(
 
     minimum_needed = max(posts_per_day * slot_option_count, posts_per_day + reserve_count)
     recent_keys = recent_used_video_keys()
+    recent_channel_keys = recent_used_channel_keys()
     original_candidates = list(candidates)
     if recent_keys:
         fresh_candidates = [candidate for candidate in candidates if _candidate_video_key(candidate) not in recent_keys]
@@ -1485,6 +1506,13 @@ def build_daily_post_plan(
         if log_fn:
             log_fn(f"Excluyendo {repeated} videos usados recientemente de la planificacion.")
         candidates = fresh_candidates
+
+    if recent_channel_keys:
+        fresh_channels = [candidate for candidate in candidates if _channel_key(candidate) not in recent_channel_keys]
+        repeated_channels = len(candidates) - len(fresh_channels)
+        if repeated_channels and log_fn:
+            log_fn(f"Excluyendo {repeated_channels} candidatos de creadores usados hace poco.")
+        candidates = fresh_channels
 
     if len(candidates) < minimum_needed:
         if log_fn:
@@ -1503,6 +1531,8 @@ def build_daily_post_plan(
         expanded_candidates = _dedupe_candidates_by_video(expanded_candidates)
         if recent_keys:
             expanded_candidates = [candidate for candidate in expanded_candidates if _candidate_video_key(candidate) not in recent_keys]
+        if recent_channel_keys:
+            expanded_candidates = [candidate for candidate in expanded_candidates if _channel_key(candidate) not in recent_channel_keys]
         candidates = expanded_candidates
 
     if len(candidates) < minimum_needed:

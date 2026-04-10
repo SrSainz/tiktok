@@ -119,6 +119,7 @@ APP_TIMEZONE = os.getenv("APP_TIMEZONE", "Europe/Madrid").strip() or "Europe/Mad
 SCHEDULER_ENABLED = os.getenv("DAILY_REVIEW_SCHEDULER_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
 SCHEDULER_SLOT_TIMES_RAW = os.getenv("DAILY_REVIEW_SLOT_TIMES", "09:30,13:30,18:30,21:30,23:00").strip()
 SCHEDULER_PREP_MINUTES = int(os.getenv("DAILY_REVIEW_PREP_MINUTES", "20").strip() or "20")
+SCHEDULER_PREP_MINUTES_BY_SLOT_RAW = os.getenv("DAILY_REVIEW_PREP_MINUTES_BY_SLOT", "09:30=15").strip()
 SCHEDULER_PER_CHANNEL_SCAN = int(os.getenv("DAILY_REVIEW_PER_CHANNEL_SCAN", "12").strip() or "12")
 SCHEDULER_MAX_RESULTS = int(os.getenv("DAILY_REVIEW_MAX_RESULTS", "18").strip() or "18")
 SCHEDULER_MIN_SOURCE_DURATION = int(os.getenv("DAILY_REVIEW_MIN_SOURCE_DURATION", "90").strip() or "90")
@@ -168,6 +169,30 @@ def _parse_scheduler_slot_times(raw: str) -> list[str]:
 
 
 SCHEDULER_SLOT_TIMES = _parse_scheduler_slot_times(SCHEDULER_SLOT_TIMES_RAW) or ["09:30", "13:30", "18:30", "21:30", "23:00"]
+
+
+def _parse_scheduler_prep_minutes_by_slot(raw: str) -> dict[str, int]:
+    parsed: dict[str, int] = {}
+    for part in (raw or "").split(","):
+        value = part.strip()
+        if not value or "=" not in value:
+            continue
+        slot_raw, minutes_raw = value.split("=", 1)
+        slot = slot_raw.strip()
+        try:
+            minutes = max(1, int(minutes_raw.strip()))
+        except Exception:
+            continue
+        if slot:
+            parsed[slot] = minutes
+    return parsed
+
+
+SCHEDULER_PREP_MINUTES_BY_SLOT = _parse_scheduler_prep_minutes_by_slot(SCHEDULER_PREP_MINUTES_BY_SLOT_RAW)
+
+
+def _prep_minutes_for_slot(slot_label: str) -> int:
+    return int(SCHEDULER_PREP_MINUTES_BY_SLOT.get(slot_label, SCHEDULER_PREP_MINUTES))
 
 
 def _cookie_file_is_usable(path: str) -> bool:
@@ -360,7 +385,7 @@ def _save_scheduler_state() -> None:
 def _scheduler_window_for(day: datetime, slot_label: str) -> dict[str, str]:
     hour_str, minute_str = slot_label.split(":", 1)
     publish_at = day.replace(hour=int(hour_str), minute=int(minute_str), second=0, microsecond=0)
-    prepare_at = publish_at - timedelta(minutes=SCHEDULER_PREP_MINUTES)
+    prepare_at = publish_at - timedelta(minutes=_prep_minutes_for_slot(slot_label))
     return {
         "slot_label": slot_label,
         "prepare_at": prepare_at.isoformat(),
@@ -377,6 +402,7 @@ def _get_scheduler_status() -> dict[str, Any]:
         "timezone": APP_TIMEZONE,
         "slot_times": list(SCHEDULER_SLOT_TIMES),
         "prep_minutes": SCHEDULER_PREP_MINUTES,
+        "prep_minutes_by_slot": dict(SCHEDULER_PREP_MINUTES_BY_SLOT),
         "now_local": now.isoformat(),
         "state": state,
         "windows_today": [_scheduler_window_for(now, slot) for slot in SCHEDULER_SLOT_TIMES],
@@ -1393,7 +1419,7 @@ def _resolve_scheduler_slot(slot_label: str | None = None) -> tuple[str, datetim
         if publish_at < now:
             publish_at = publish_at + timedelta(days=1)
 
-    prepare_at = publish_at - timedelta(minutes=SCHEDULER_PREP_MINUTES)
+    prepare_at = publish_at - timedelta(minutes=_prep_minutes_for_slot(normalized))
     return normalized, prepare_at, publish_at
 
 
@@ -1419,7 +1445,7 @@ def _daily_review_scheduler_loop() -> None:
                     continue
                 hour_str, minute_str = slot_label.split(":", 1)
                 publish_at = now.replace(hour=int(hour_str), minute=int(minute_str), second=0, microsecond=0)
-                prepare_at = publish_at - timedelta(minutes=SCHEDULER_PREP_MINUTES)
+                prepare_at = publish_at - timedelta(minutes=_prep_minutes_for_slot(slot_label))
                 if next_trigger_at is None and now <= prepare_at:
                     next_trigger_at = prepare_at.isoformat()
                 latest_useful = publish_at - timedelta(minutes=1)
@@ -1436,7 +1462,7 @@ def _daily_review_scheduler_loop() -> None:
                         continue
                     hour_str, minute_str = slot_label.split(":", 1)
                     publish_at = now.replace(hour=int(hour_str), minute=int(minute_str), second=0, microsecond=0)
-                    prepare_at = publish_at - timedelta(minutes=SCHEDULER_PREP_MINUTES)
+                    prepare_at = publish_at - timedelta(minutes=_prep_minutes_for_slot(slot_label))
                     if now <= prepare_at:
                         future_prepares.append(prepare_at)
                 if future_prepares:
