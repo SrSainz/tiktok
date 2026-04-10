@@ -334,6 +334,12 @@ SOCIAL_BAD_PHRASES = (
 
 PLANNER_SLOTS = [
     {
+        "slot_key": "morning",
+        "label": "Mañana",
+        "publish_time": "09:30",
+        "strategy": "Clip muy claro, curioso y facil de consumir para la primera apertura fuerte del dia.",
+    },
+    {
         "slot_key": "lunch",
         "label": "Comida",
         "publish_time": "13:30",
@@ -1028,7 +1034,12 @@ def _daily_plan_score(candidate: VideoCandidate, slot: dict[str, str], *, used_c
     score += min(14.0, math.log10(float(candidate.view_count or 0.0) + 1.0) * 4.0)
 
     slot_key = slot.get("slot_key", "")
-    if slot_key == "lunch":
+    if slot_key == "morning":
+        if traits["question"] or traits["digits"]:
+            score += 9.0
+        if traits["story"]:
+            score += 4.0
+    elif slot_key == "lunch":
         if traits["question"] or traits["comparison"]:
             score += 9.0
         if traits["digits"]:
