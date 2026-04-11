@@ -81,6 +81,7 @@ def _normalize_public_base_url(raw: str) -> str:
 
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", str(REPO_ROOT / "output"))).resolve()
 WORK_DIR = Path(os.getenv("WORK_DIR", str(REPO_ROOT / "work"))).resolve()
+DATA_DIR = Path(os.getenv("DATA_DIR", str(REPO_ROOT / "data"))).resolve()
 TIKTOK_VERIFICATION_DIR = Path(os.getenv("TIKTOK_VERIFICATION_DIR", str(REPO_ROOT / "tiktok_verification"))).resolve()
 FRONTEND_INDEX = REPO_ROOT / "index.html"
 BACKEND_PUBLIC_URL = (
@@ -131,11 +132,13 @@ SCHEDULER_OPTIONS_PER_SLOT = int(os.getenv("DAILY_REVIEW_OPTIONS_PER_SLOT", "3")
 SCHEDULER_LANGUAGE = os.getenv("DAILY_REVIEW_LANGUAGE", "es").strip() or "es"
 SCHEDULER_MODE = os.getenv("DAILY_REVIEW_MODE", "creators_es").strip() or "creators_es"
 SCHEDULER_STATE_FILE = WORK_DIR / "daily_review_scheduler_state.json"
+PUBLISH_REQUESTS_FILE = DATA_DIR / "publish_requests.json"
 RETENTION_ENABLED = os.getenv("GENERATED_MEDIA_RETENTION_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
 RETENTION_HOURS = max(1, int(os.getenv("GENERATED_MEDIA_RETENTION_HOURS", "24").strip() or "24"))
 RETENTION_INTERVAL_MINUTES = max(5, int(os.getenv("GENERATED_MEDIA_RETENTION_INTERVAL_MINUTES", "60").strip() or "60"))
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 WORK_DIR.mkdir(parents=True, exist_ok=True)
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 TIKTOK_VERIFICATION_DIR.mkdir(parents=True, exist_ok=True)
 
 try:
@@ -317,6 +320,47 @@ _jobs: dict[str, dict[str, Any]] = {}
 _publish_lock = threading.Lock()
 _publish_requests: dict[str, dict[str, Any]] = {}
 _daily_batches_lock = threading.Lock()
+
+
+def _persist_publish_requests_locked() -> None:
+    snapshot = {request_id: dict(payload) for request_id, payload in _publish_requests.items()}
+    tmp_path = PUBLISH_REQUESTS_FILE.with_suffix(PUBLISH_REQUESTS_FILE.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp_path.replace(PUBLISH_REQUESTS_FILE)
+
+
+def _load_publish_requests() -> None:
+    global _publish_requests
+    if not PUBLISH_REQUESTS_FILE.exists():
+        return
+    try:
+        payload = json.loads(PUBLISH_REQUESTS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    if not isinstance(payload, dict):
+        return
+    restored: dict[str, dict[str, Any]] = {}
+    for request_id, req in payload.items():
+        if not isinstance(req, dict):
+            continue
+        rid = str(req.get("request_id") or request_id or "").strip()
+        if not rid:
+            continue
+        req["request_id"] = rid
+        restored[rid] = req
+    with _publish_lock:
+        _publish_requests = restored
+
+
+def _get_publish_request(request_id: str, *, reload_if_missing: bool = False) -> dict[str, Any] | None:
+    with _publish_lock:
+        req = _publish_requests.get(request_id)
+    if req or not reload_if_missing:
+        return req
+    _load_publish_requests()
+    with _publish_lock:
+        return _publish_requests.get(request_id)
+
 _daily_review_batches: dict[str, dict[str, Any]] = {}
 _tiktok_oauth_lock = threading.Lock()
 _tiktok_oauth_states: dict[str, dict[str, Any]] = {}
@@ -488,6 +532,7 @@ def _purge_old_memory(cutoff: datetime) -> dict[str, int]:
         ]
         for request_id in removable:
             _publish_requests.pop(request_id, None)
+        _persist_publish_requests_locked()
         purged["publish_requests"] = len(removable)
 
     with _daily_batches_lock:
@@ -553,6 +598,7 @@ def _ensure_retention_cleanup_started() -> None:
 def _startup_tasks() -> None:
     backfill_recent_used_videos_from_output(OUTPUT_DIR)
     _load_scheduler_state()
+    _load_publish_requests()
     _ensure_telegram_poller_started()
     _ensure_daily_review_scheduler_started()
     _ensure_retention_cleanup_started()
@@ -1166,6 +1212,7 @@ def _set_publish_state(request_id: str, **updates: Any) -> None:
             return
         req.update(updates)
         req["updated_at"] = _utc_now_iso()
+        _persist_publish_requests_locked()
 
 
 def _append_publish_log(request_id: str, message: str) -> None:
@@ -1176,6 +1223,7 @@ def _append_publish_log(request_id: str, message: str) -> None:
         req.setdefault("logs", []).append(f"{datetime.now().strftime('%H:%M:%S')} {message}")
         req["logs"] = req["logs"][-200:]
         req["updated_at"] = _utc_now_iso()
+        _persist_publish_requests_locked()
 
 
 def _serialize_publish_request(req: dict[str, Any]) -> dict[str, Any]:
@@ -1701,6 +1749,7 @@ def _run_daily_review_batch(batch_id: str, req: DailyReviewBatchRequest) -> None
                     }
                     with _publish_lock:
                         _publish_requests[request_id] = publish_payload
+                        _persist_publish_requests_locked()
                     item_status = "review_sent"
                 else:
                     request_id = None
@@ -1928,8 +1977,7 @@ def _process_telegram_callback(callback_query: dict[str, Any]) -> None:
         return
     request_id = parts[1]
     action = parts[2]
-    with _publish_lock:
-        req = _publish_requests.get(request_id)
+    req = _get_publish_request(request_id, reload_if_missing=True)
     if not req:
         _telegram_call("answerCallbackQuery", data={"callback_query_id": callback_id, "text": "Solicitud no encontrada."}, timeout=30)
         return
@@ -1963,6 +2011,7 @@ def _process_telegram_callback(callback_query: dict[str, Any]) -> None:
                 other_req["updated_at"] = _utc_now_iso()
                 other_req.setdefault("logs", []).append("Descartada al aprobar otra opcion del mismo bloque.")
                 sibling_reqs.append(dict(other_req))
+            _persist_publish_requests_locked()
 
     for sibling_req in sibling_reqs:
         _clear_publish_reply_markup_for_request(sibling_req)
@@ -2395,6 +2444,7 @@ def prepare_tiktok_review(req: PrepareTikTokReviewRequest, request: Request) -> 
     }
     with _publish_lock:
         _publish_requests[request_id] = payload
+        _persist_publish_requests_locked()
     _append_log(req.job_id, f"Solicitud TikTok enviada a Telegram para opcion {req.option_id}.")
     return {"ok": True, **_serialize_publish_request(payload)}
 
