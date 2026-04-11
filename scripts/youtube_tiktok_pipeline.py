@@ -102,6 +102,11 @@ CAPTION_FILLER_WORDS = {
 
 CAPTION_NOISE_LABELS = {
     "aplausos",
+    "nbsp",
+    "amp",
+    "quot",
+    "lt",
+    "gt",
     "music",
     "musica",
     "música",
@@ -211,7 +216,7 @@ def normalize_text(text: str) -> str:
             pass
     text = re.sub(r"<[^>]+>", "", text)
     text = text.replace("&nbsp;", " ")
-    text = text.replace("nbsp", " ")
+    text = re.sub(r"\b(?:nbsp|amp|quot|lt|gt)\b", " ", text, flags=re.IGNORECASE)
     text = re.sub(r"[♪♫]+", " ", text)
     text = text.replace("\n", " ")
     text = re.sub(r"\s+", " ", text).strip()
@@ -262,6 +267,80 @@ def _trim_caption_tokens(tokens: List[str]) -> List[str]:
     while trimmed and not _is_meaningful_caption_word(trimmed[-1]):
         trimmed.pop()
     return trimmed
+
+
+def _compress_repeated_token_windows(tokens: List[str]) -> List[str]:
+    if len(tokens) < 6:
+        return list(tokens)
+    result = list(tokens)
+    for window_size in (5, 4, 3, 2):
+        changed = True
+        while changed and len(result) >= window_size * 2:
+            changed = False
+            compact: List[str] = []
+            i = 0
+            while i < len(result):
+                window = [t.lower() for t in result[i : i + window_size]]
+                next_window = [t.lower() for t in result[i + window_size : i + window_size * 2]]
+                if len(window) == window_size and window == next_window:
+                    compact.extend(result[i : i + window_size])
+                    i += window_size * 2
+                    changed = True
+                    continue
+                compact.append(result[i])
+                i += 1
+            result = compact
+    return result
+
+
+def _looks_broken_caption(tokens: List[str]) -> bool:
+    if not tokens:
+        return True
+    lowered = [token.lower() for token in tokens if token]
+    long_tokens = [token for token in lowered if len(token) >= 4 and not any(ch.isdigit() for ch in token)]
+    suspicious_html = sum(1 for token in lowered if token in CAPTION_NOISE_LABELS)
+    short_noise = sum(
+        1
+        for token in lowered
+        if len(token) <= 2 and token not in CAPTION_KEEP_SHORT_WORDS and not any(ch.isdigit() for ch in token)
+    )
+    malformed = 0
+    for token in long_tokens:
+        vowels = sum(1 for ch in token if ch in "aeiouáéíóúü")
+        if vowels == 0:
+            malformed += 1
+            continue
+        if token.endswith(("nbsp", "quot", "amp")):
+            malformed += 1
+            continue
+        if len(token) >= 5 and len(set(token)) <= 2:
+            malformed += 1
+    if suspicious_html:
+        return True
+    if short_noise / max(1, len(lowered)) >= 0.34:
+        return True
+    if malformed and malformed / max(1, len(long_tokens)) >= 0.4:
+        return True
+    return False
+
+
+def _select_best_caption_window(tokens: List[str], max_words: int = 8) -> List[str]:
+    if len(tokens) <= max_words:
+        return list(tokens)
+    best_window = list(tokens[:max_words])
+    best_score = -10**9
+    for start in range(0, len(tokens) - max_words + 1):
+        window = list(tokens[start : start + max_words])
+        lowered = [token.lower() for token in window]
+        meaningful = [token for token in lowered if _is_meaningful_caption_word(token)]
+        duplicate_penalty = len(lowered) - len(set(lowered))
+        html_penalty = sum(1 for token in lowered if token in CAPTION_NOISE_LABELS)
+        digit_bonus = sum(1 for token in lowered if any(ch.isdigit() for ch in token))
+        score = len(set(meaningful)) * 3 + len(meaningful) + digit_bonus * 2 - duplicate_penalty * 3 - html_penalty * 6
+        if score > best_score:
+            best_score = score
+            best_window = window
+    return _trim_caption_tokens(best_window)
 
 
 def _is_low_value_caption(tokens: List[str]) -> bool:
@@ -345,10 +424,23 @@ def is_within_last_days(upload_date: Optional[str], days: int, today: date) -> b
 
 def parse_vtt(path: Path) -> List[CaptionCue]:
     cues: List[CaptionCue] = []
+    previous_line = ""
     for cue in webvtt.read(str(path)):
-        text = normalize_text(cue.text)
+        line_candidates = [normalize_text(line) for line in str(cue.text or "").splitlines()]
+        line_candidates = [line for line in line_candidates if line]
+        if not line_candidates:
+            continue
+        preferred = line_candidates[-1]
+        if preferred.lower() == previous_line.lower() and len(line_candidates) >= 2:
+            preferred = line_candidates[-2]
+        if len(preferred) < 6:
+            longest = max(line_candidates, key=len)
+            if len(longest) > len(preferred):
+                preferred = longest
+        text = normalize_text(preferred)
         if not text:
             continue
+        previous_line = text
         cues.append(CaptionCue(start=parse_ts(cue.start), end=parse_ts(cue.end), text=text))
     return cues
 
@@ -434,12 +526,17 @@ def fmt_ass(seconds: float) -> str:
 
 def clean_caption_text(text: str) -> str:
     text = normalize_text(text)
+    if re.search(r"\b[A-ZÁÉÍÓÚÜÑ]\s+[A-ZÁÉÍÓÚÜÑ]{3,}\b", text):
+        return ""
     text = re.sub(r"\[[^\]]+\]", "", text)
     text = re.sub(r"\([^)]+\)", "", text)
     text = re.sub(r"\b(?:music|musica|música|aplausos|risas|sonido original)\b", " ", text, flags=re.IGNORECASE)
     text = re.sub(r"\b([A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9]+)(?:\s+\1\b){1,}", r"\1", text, flags=re.IGNORECASE)
     text = re.sub(r"\s+", " ", text).strip()
     tokens = _trim_caption_tokens(_tokenize_caption_words(text))
+    tokens = _compress_repeated_token_windows(tokens)
+    if _looks_broken_caption(tokens):
+        return ""
     if _is_low_value_caption(tokens):
         return ""
     filtered: List[str] = []
@@ -448,11 +545,17 @@ def clean_caption_text(text: str) -> str:
         low = token.lower()
         if low in CAPTION_NOISE_LABELS:
             continue
+        if len(low) <= 2 and low not in CAPTION_KEEP_SHORT_WORDS and not any(ch.isdigit() for ch in low):
+            continue
         if low == prev and low not in CAPTION_KEEP_SHORT_WORDS:
             continue
         filtered.append(token)
         prev = low
+    filtered = _compress_repeated_token_windows(filtered)
     filtered = _trim_caption_tokens(filtered)
+    filtered = _select_best_caption_window(filtered, max_words=8)
+    if _looks_broken_caption(filtered):
+        return ""
     if _is_low_value_caption(filtered):
         return ""
     return " ".join(filtered)
@@ -489,20 +592,26 @@ def chunk_caption_words(text: str, cue_duration: float) -> List[str]:
     words = _trim_caption_tokens(_tokenize_caption_words(clean))
     if not words:
         return []
+    words = _compress_repeated_token_windows(words)
+    if _looks_broken_caption(words):
+        return []
     if _is_low_value_caption(words):
         return []
 
     max_chunks_by_time = max(1, int(cue_duration / 0.55))
-    chunk_count_by_words = max(1, math.ceil(len(words) / 4))
+    chunk_count_by_words = max(1, math.ceil(len(words) / 3))
     chunk_count = min(max_chunks_by_time, chunk_count_by_words, 4, len(words))
     words_per_chunk = max(1, math.ceil(len(words) / chunk_count))
 
     chunks: List[str] = []
     for i in range(0, len(words), words_per_chunk):
         chunk_words = _trim_caption_tokens(words[i : i + words_per_chunk])
+        chunk_words = _compress_repeated_token_windows(chunk_words)
         if not chunk_words or _is_low_value_caption(chunk_words):
             continue
-        chunk_text = wrap_caption_lines(chunk_words, max_line_chars=20, max_lines=2).upper()
+        if _looks_broken_caption(chunk_words):
+            continue
+        chunk_text = wrap_caption_lines(chunk_words, max_line_chars=18, max_lines=2).upper()
         if chunk_text:
             chunks.append(chunk_text)
     return chunks
@@ -622,6 +731,9 @@ def extract_hook_focus_text(text: str) -> str:
 
     words = re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9]+", clean, flags=re.UNICODE)
     if not words:
+        return ""
+    words = _compress_repeated_token_windows(words)
+    if _looks_broken_caption(words):
         return ""
 
     filtered = [
