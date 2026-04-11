@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
-import tempfile
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
@@ -17,6 +18,7 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 UPLOAD_SCRIPT = (REPO_ROOT / "scripts" / "upload_to_tiktok.py").resolve()
 DEFAULT_BIND = "0.0.0.0"
 DEFAULT_PORT = 8766
+LOCAL_RETENTION_HOURS = max(1, int(os.getenv("LOCAL_UPLOADER_RETENTION_HOURS", "6").strip() or "6"))
 
 
 def _json(handler: BaseHTTPRequestHandler, status: int, payload: dict) -> None:
@@ -33,10 +35,28 @@ def _download_video(video_url: str) -> Path:
     name = Path(parsed.path or "/video.mp4").name or "video.mp4"
     if not name.lower().endswith(".mp4"):
         name += ".mp4"
-    target = UPLOAD_DIR / name
+    target = UPLOAD_DIR / f"{uuid.uuid4().hex[:12]}_{name}"
     with urlopen(video_url, timeout=120) as response:
         target.write_bytes(response.read())
     return target
+
+
+def _purge_old_local_uploads() -> int:
+    import time
+
+    cutoff = time.time() - (LOCAL_RETENTION_HOURS * 3600)
+    deleted = 0
+    for child in UPLOAD_DIR.glob("*"):
+        try:
+            if not child.is_file():
+                continue
+            if child.stat().st_mtime >= cutoff:
+                continue
+            child.unlink(missing_ok=True)
+            deleted += 1
+        except Exception:
+            continue
+    return deleted
 
 
 def _run_upload(video_path: Path, caption: str, privacy_level: str, manual_wait: int, auto_post: bool) -> dict:
@@ -100,6 +120,7 @@ class Handler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", "0"))
             body = self.rfile.read(length) if length > 0 else b"{}"
             payload = json.loads(body.decode("utf-8"))
+            _purge_old_local_uploads()
             video_url = str(payload.get("video_url") or "").strip()
             caption = str(payload.get("caption") or "").strip()
             privacy_level = str(payload.get("privacy_level") or "PUBLIC_TO_EVERYONE").strip()
@@ -108,9 +129,15 @@ class Handler(BaseHTTPRequestHandler):
             if not video_url:
                 return _json(self, 400, {"ok": False, "error": "video_url_required"})
             local_video = _download_video(video_url)
-            result = _run_upload(local_video, caption, privacy_level, manual_wait, auto_post)
-            status = 200 if result["returncode"] == 0 else 500
-            return _json(self, status, {"ok": result["returncode"] == 0, **result, "downloaded_to": str(local_video)})
+            try:
+                result = _run_upload(local_video, caption, privacy_level, manual_wait, auto_post)
+                status = 200 if result["returncode"] == 0 else 500
+                return _json(self, status, {"ok": result["returncode"] == 0, **result, "downloaded_to": str(local_video)})
+            finally:
+                try:
+                    local_video.unlink(missing_ok=True)
+                except Exception:
+                    pass
         except Exception as exc:
             return _json(self, 500, {"ok": False, "error": str(exc)})
 

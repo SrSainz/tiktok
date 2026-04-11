@@ -136,6 +136,14 @@ SCHEDULER_STATE_FILE = WORK_DIR / "daily_review_scheduler_state.json"
 PUBLISH_REQUESTS_FILE = DATA_DIR / "publish_requests.json"
 RETENTION_ENABLED = os.getenv("GENERATED_MEDIA_RETENTION_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
 RETENTION_HOURS = max(1, int(os.getenv("GENERATED_MEDIA_RETENTION_HOURS", "24").strip() or "24"))
+RETENTION_OUTPUT_HOURS = max(
+    1,
+    int(os.getenv("GENERATED_MEDIA_OUTPUT_RETENTION_HOURS", str(RETENTION_HOURS)).strip() or str(RETENTION_HOURS)),
+)
+RETENTION_WORK_HOURS = max(
+    1,
+    int(os.getenv("GENERATED_MEDIA_WORK_RETENTION_HOURS", "6").strip() or "6"),
+)
 RETENTION_INTERVAL_MINUTES = max(5, int(os.getenv("GENERATED_MEDIA_RETENTION_INTERVAL_MINUTES", "60").strip() or "60"))
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 WORK_DIR.mkdir(parents=True, exist_ok=True)
@@ -552,11 +560,12 @@ def _purge_old_memory(cutoff: datetime) -> dict[str, int]:
 
 def _run_retention_cleanup() -> None:
     now_utc = datetime.now(timezone.utc)
-    cutoff = now_utc - timedelta(hours=RETENTION_HOURS)
-    cutoff_ts = cutoff.timestamp()
-    deleted_output_entries = _delete_old_entries(OUTPUT_DIR, cutoff_ts)
-    deleted_work_entries = _delete_old_entries(WORK_DIR, cutoff_ts)
-    purged = _purge_old_memory(cutoff)
+    output_cutoff = now_utc - timedelta(hours=RETENTION_OUTPUT_HOURS)
+    work_cutoff = now_utc - timedelta(hours=RETENTION_WORK_HOURS)
+    memory_cutoff = now_utc - timedelta(hours=min(RETENTION_OUTPUT_HOURS, RETENTION_WORK_HOURS))
+    deleted_output_entries = _delete_old_entries(OUTPUT_DIR, output_cutoff.timestamp())
+    deleted_work_entries = _delete_old_entries(WORK_DIR, work_cutoff.timestamp())
+    purged = _purge_old_memory(memory_cutoff)
     with _cleanup_lock:
         _cleanup_state.update(
             {
@@ -2109,6 +2118,15 @@ def _run_job(job_id: str, req: CreateJobRequest) -> None:
         )
         result = generate_dashboard(config, log_fn=lambda m: _append_log(job_id, m))
         payload = _serialize_result(result)
+        work_job_dir = Path(getattr(result, "work_job_dir", "") or "")
+        if work_job_dir:
+            try:
+                shutil.rmtree(work_job_dir, ignore_errors=False)
+                _append_log(job_id, f"Temporales borrados: {work_job_dir.name}")
+            except FileNotFoundError:
+                pass
+            except Exception as cleanup_exc:
+                _append_log(job_id, f"No se pudieron borrar temporales ({work_job_dir}): {cleanup_exc}")
         _set_job_state(job_id, status="completed", result=payload)
         _append_log(job_id, "Generacion completada.")
     except Exception as exc:
@@ -2158,6 +2176,8 @@ def health() -> dict[str, Any]:
         "scheduler_last_error": scheduler["state"].get("last_error"),
         "retention_enabled": RETENTION_ENABLED,
         "retention_hours": RETENTION_HOURS,
+        "retention_output_hours": RETENTION_OUTPUT_HOURS,
+        "retention_work_hours": RETENTION_WORK_HOURS,
         "retention_interval_minutes": RETENTION_INTERVAL_MINUTES,
         "retention_last_run_at": cleanup.get("last_run_at"),
         "retention_last_error": cleanup.get("last_error"),

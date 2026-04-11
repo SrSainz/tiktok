@@ -210,6 +210,7 @@ class DashboardResult:
     dashboard_dir: str
     dashboard_html: str
     manifest_path: str
+    work_job_dir: str
     source_title: str
     source_url: str
     options: List[ClipOption]
@@ -2814,6 +2815,7 @@ def generate_dashboard(config: DashboardConfig, log_fn: Callable[[str], None] = 
         dashboard_dir=str(dashboard_dir),
         dashboard_html=str(html_path),
         manifest_path=str(manifest_path),
+        work_job_dir=str(job_dir),
         source_title=source_title,
         source_url=manifest["source_url"],
         options=options,
