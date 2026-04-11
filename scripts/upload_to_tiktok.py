@@ -10,6 +10,7 @@ import re
 import sys
 import unicodedata
 from pathlib import Path
+from urllib.parse import urlparse
 
 
 JSON_LOG_MODE = False
@@ -204,6 +205,183 @@ def pick_latest_video(output_dir: Path) -> Path:
     return files[0]
 
 
+def _cdp_debugger_address(connect_cdp: str) -> str:
+    parsed = urlparse(connect_cdp)
+    if parsed.scheme and parsed.hostname and parsed.port:
+        return f"{parsed.hostname}:{parsed.port}"
+    return connect_cdp.replace("http://", "").replace("https://", "").strip().rstrip("/")
+
+
+def _upload_via_selenium_cdp(
+    *,
+    connect_cdp: str,
+    video_path: Path,
+    caption: str,
+    privacy_level: str,
+    auto_post: bool,
+    manual_wait: int,
+) -> dict[str, str]:
+    try:
+        from selenium import webdriver
+        from selenium.webdriver.chrome.options import Options
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support.ui import WebDriverWait
+        from selenium.webdriver.support import expected_conditions as EC
+    except Exception as exc:
+        raise RuntimeError(f"SELENIUM_NOT_AVAILABLE: {exc}") from exc
+
+    debugger_address = _cdp_debugger_address(connect_cdp)
+    options = Options()
+    options.debugger_address = debugger_address
+    driver = webdriver.Chrome(options=options)
+    try:
+        log(f"Conectado a navegador existente por Selenium/CDP: {debugger_address}")
+        upload_url = "https://www.tiktok.com/tiktokstudio/upload?lang=es"
+
+        try:
+            current_handle = driver.current_window_handle
+            for handle in list(driver.window_handles):
+                driver.switch_to.window(handle)
+                current_url = driver.current_url or ""
+                if handle == current_handle:
+                    continue
+                if "tiktok.com/tiktokstudio/upload" in current_url:
+                    try:
+                        driver.close()
+                    except Exception:
+                        pass
+            try:
+                driver.switch_to.window(current_handle)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+        driver.switch_to.new_window("tab")
+        driver.get(upload_url)
+
+        wait = WebDriverWait(driver, 60)
+
+        def _find_file_input():
+            selectors = [
+                "input[type='file']",
+                "input[accept*='video']",
+                "input[data-e2e*='upload']",
+            ]
+            for selector in selectors:
+                found = driver.find_elements(By.CSS_SELECTOR, selector)
+                if found:
+                    return found[0], selector
+            return None, ""
+
+        file_input, selector = _find_file_input()
+        if not file_input:
+            buttons = [
+                "//*[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZÁÉÍÓÚ', 'abcdefghijklmnopqrstuvwxyzáéíóú'),'seleccionar vídeo')]",
+                "//*[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZÁÉÍÓÚ', 'abcdefghijklmnopqrstuvwxyzáéíóú'),'seleccionar video')]",
+                "//*[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZÁÉÍÓÚ', 'abcdefghijklmnopqrstuvwxyzáéíóú'),'sustituir')]",
+                "//*[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'),'upload')]",
+                "//*[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZÁÉÍÓÚ', 'abcdefghijklmnopqrstuvwxyzáéíóú'),'cargar')]",
+            ]
+            for xpath in buttons:
+                elems = driver.find_elements(By.XPATH, xpath)
+                if elems:
+                    try:
+                        elems[0].click()
+                    except Exception:
+                        driver.execute_script("arguments[0].click();", elems[0])
+                    break
+            wait.until(lambda d: len(d.find_elements(By.CSS_SELECTOR, "input[type='file'], input[accept*='video'], input[data-e2e*='upload']")) > 0)
+            file_input, selector = _find_file_input()
+        if not file_input:
+            raise RuntimeError("BROWSER_FILE_INPUT_NOT_FOUND")
+
+        file_input.send_keys(str(video_path))
+        log(f"Video cargado (selenium:{selector or 'input'}): {video_path.name}")
+
+        wait.until(lambda d: "upload" in (d.current_url or "") or len(d.find_elements(By.CSS_SELECTOR, "[data-e2e='video_visibility_container']")) > 0)
+
+        if caption:
+            try:
+                caption_box = wait.until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "div[contenteditable='true']"))
+                )
+                driver.execute_script(
+                    """
+                    const el = arguments[0];
+                    const value = arguments[1];
+                    el.focus();
+                    el.innerHTML = '';
+                    el.textContent = value;
+                    el.dispatchEvent(new InputEvent('input', {bubbles: true, data: value, inputType: 'insertText'}));
+                    el.dispatchEvent(new Event('change', {bubbles: true}));
+                    """,
+                    caption_box,
+                    caption[:2200],
+                )
+            except Exception:
+                log("No se pudo autocompletar caption; revisa manualmente.")
+
+        if privacy_level:
+            try:
+                target = _normalize_text(PRIVACY_LABELS.get(privacy_level, privacy_level))
+                combo = wait.until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "[data-e2e='video_visibility_container'] button[role='combobox']"))
+                )
+                try:
+                    combo.click()
+                except Exception:
+                    driver.execute_script("arguments[0].click();", combo)
+                wait.until(
+                    lambda d: len(
+                        d.find_elements(By.CSS_SELECTOR, "div.Select__item, [role='option'], div[aria-selected]")
+                    ) > 0
+                )
+                matched = False
+                for element in driver.find_elements(By.CSS_SELECTOR, "div.Select__item, [role='option'], div[aria-selected]"):
+                    text = _normalize_text(element.text)
+                    if target and target in text:
+                        try:
+                            element.click()
+                        except Exception:
+                            driver.execute_script("arguments[0].click();", element)
+                        matched = True
+                        break
+                if matched:
+                    log(f"Privacidad ajustada a: {PRIVACY_LABELS.get(privacy_level, privacy_level)}")
+                else:
+                    log("No se encontro la opcion de privacidad deseada; se mantiene el valor actual.")
+            except Exception:
+                log("No se pudo ajustar la privacidad automaticamente; se mantiene el valor actual.")
+
+        if auto_post:
+            post_btn = wait.until(
+                EC.element_to_be_clickable((By.XPATH, "//button[contains(., 'Publicar') or contains(., 'Post')]"))
+            )
+            try:
+                post_btn.click()
+            except Exception:
+                driver.execute_script("arguments[0].click();", post_btn)
+            log("Intentando publicar automaticamente...")
+            try:
+                WebDriverWait(driver, 45).until(lambda d: "upload" not in (d.current_url or ""))
+                status = "publish_navigation_detected"
+            except Exception:
+                status = "post_clicked"
+        else:
+            log(f"Listo para revisar/publicar manualmente. Esperando {manual_wait}s...")
+            import time
+            time.sleep(max(1, manual_wait))
+            status = "manual_review"
+
+        return {"ok": "true", "status": status}
+    finally:
+        try:
+            driver.quit()
+        except Exception:
+            pass
+
+
 def upload(
     video_path: Path,
     caption: str,
@@ -219,6 +397,15 @@ def upload(
     chrome_profile_directory: str,
     connect_cdp: str,
 ) -> dict[str, str]:
+    if connect_cdp:
+        return _upload_via_selenium_cdp(
+            connect_cdp=connect_cdp,
+            video_path=video_path,
+            caption=caption,
+            privacy_level=privacy_level,
+            auto_post=auto_post,
+            manual_wait=manual_wait,
+        )
     try:
         from playwright.sync_api import TimeoutError as PwTimeout
         from playwright.sync_api import sync_playwright

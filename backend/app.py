@@ -116,6 +116,7 @@ TIKTOK_BROWSER_USE_SYSTEM_PROFILE = (
 TIKTOK_BROWSER_USER_DATA_DIR = os.getenv("TIKTOK_BROWSER_USER_DATA_DIR", "").strip()
 TIKTOK_BROWSER_PROFILE_DIRECTORY = os.getenv("TIKTOK_BROWSER_PROFILE_DIRECTORY", "Default").strip() or "Default"
 TIKTOK_BROWSER_TIMEOUT_SEC = int(os.getenv("TIKTOK_BROWSER_TIMEOUT_SEC", "900").strip() or "900")
+TIKTOK_BROWSER_HELPER_URL = os.getenv("TIKTOK_BROWSER_HELPER_URL", "").strip().rstrip("/")
 APP_TIMEZONE = os.getenv("APP_TIMEZONE", "Europe/Madrid").strip() or "Europe/Madrid"
 SCHEDULER_ENABLED = os.getenv("DAILY_REVIEW_SCHEDULER_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
 SCHEDULER_SLOT_TIMES_RAW = os.getenv("DAILY_REVIEW_SLOT_TIMES", "09:30,13:30,18:30,21:30,23:00").strip()
@@ -813,6 +814,40 @@ def _clean_browser_fallback_stderr(stderr: str) -> str:
 
 
 def _run_tiktok_browser_fallback(video_path: Path, caption: str, privacy_level: str) -> dict[str, Any]:
+    helper_url = TIKTOK_BROWSER_HELPER_URL
+    if helper_url:
+        public_video_url = _build_absolute_asset_url(_file_to_url(str(video_path)) or "", base_url=_public_base_url(None))
+        if not public_video_url:
+            raise RuntimeError("Browser fallback fallo: no se pudo construir una URL publica del video.")
+        try:
+            response = requests.post(
+                helper_url,
+                json={
+                    "video_url": public_video_url,
+                    "caption": caption[:2200],
+                    "privacy_level": privacy_level,
+                    "manual_wait": TIKTOK_BROWSER_MANUAL_WAIT,
+                    "auto_post": TIKTOK_BROWSER_AUTO_POST,
+                },
+                timeout=max(120, TIKTOK_BROWSER_TIMEOUT_SEC),
+            )
+            response.raise_for_status()
+            helper_payload = response.json()
+        except requests.RequestException as exc:
+            raise RuntimeError(f"Browser fallback helper fallo: {exc}") from exc
+        except Exception as exc:
+            raise RuntimeError(f"Browser fallback helper devolvio respuesta invalida: {exc}") from exc
+        if not helper_payload.get("ok"):
+            detail = (
+                str(helper_payload.get("error") or "").strip()
+                or str((helper_payload.get("result") or {}).get("error") or "").strip()
+                or str((helper_payload.get("result") or {}).get("status") or "").strip()
+                or str(helper_payload.get("stderr") or "").strip()
+                or "helper_failed"
+            )
+            raise RuntimeError(f"Browser fallback helper fallo: {detail[:1200]}")
+        return {"result": helper_payload.get("result") or helper_payload}
+
     script = SCRIPTS_DIR / "upload_to_tiktok.py"
     if not script.exists():
         raise RuntimeError(f"No existe el uploader browser fallback: {script}")
@@ -2498,14 +2533,14 @@ def prepare_tiktok_review_from_output(req: PrepareTikTokReviewFromOutputRequest,
     }
     with _publish_lock:
         _publish_requests[request_id] = payload
+        _persist_publish_requests_locked()
     _append_log(synthetic_job_id, f"Solicitud TikTok reenviada a Telegram para opcion {req.option_id}.")
     return {"ok": True, **_serialize_publish_request(payload)}
 
 
 @app.get("/api/publish/requests/{request_id}")
 def get_publish_request(request_id: str) -> dict[str, Any]:
-    with _publish_lock:
-        req = _publish_requests.get(request_id)
-        if not req:
-            raise HTTPException(status_code=404, detail="publish_request_not_found")
-        return _serialize_publish_request(req)
+    req = _get_publish_request(request_id, reload_if_missing=True)
+    if not req:
+        raise HTTPException(status_code=404, detail="publish_request_not_found")
+    return _serialize_publish_request(req)

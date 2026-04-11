@@ -103,3 +103,4 @@ if (-not (Wait-NasPort -TimeoutSeconds 20)) {
 Write-Output "OK: Brave CDP local activo en 9222."
 Write-Output "OK: Tunel NAS activo en 127.0.0.1:9223."
 Write-Output "PID tunel SSH: $($proc.Id)"
+& (Join-Path $PSScriptRoot "start_tiktok_local_uploader.ps1") | Out-Host
