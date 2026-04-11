@@ -1485,18 +1485,51 @@ def _run_daily_review_batch(batch_id: str, req: DailyReviewBatchRequest) -> None
     _set_daily_batch_state(batch_id, status="running")
     _append_daily_batch_log(batch_id, "Construyendo plan diario...")
     try:
-        plan = build_daily_post_plan(
-            mode=req.mode,
-            channels=req.channels,
-            per_channel_scan=req.per_channel_scan,
-            this_week_only=req.this_week_only,
-            min_source_duration=req.min_source_duration,
-            max_results=req.max_results,
-            posts_per_day=req.posts_per_day,
-            reserve_count=req.reserve_count,
-            slot_option_count=req.options_per_slot,
-            log_fn=lambda msg: _append_daily_batch_log(batch_id, msg),
-        )
+        plan = None
+        plan_errors: list[str] = []
+        plan_attempts = [
+            {
+                "label": "normal",
+                "this_week_only": req.this_week_only,
+                "per_channel_scan": req.per_channel_scan,
+                "max_results": req.max_results,
+            },
+            {
+                "label": "retry_relajado",
+                "this_week_only": False,
+                "per_channel_scan": max(req.per_channel_scan, 20),
+                "max_results": max(req.max_results * 2, 40),
+            },
+        ]
+        for attempt_idx, attempt in enumerate(plan_attempts, start=1):
+            try:
+                if attempt_idx > 1:
+                    _append_daily_batch_log(
+                        batch_id,
+                        "Reintentando plan diario con busqueda mas amplia para evitar que una tanda se quede vacia.",
+                    )
+                plan = build_daily_post_plan(
+                    mode=req.mode,
+                    channels=req.channels,
+                    per_channel_scan=int(attempt["per_channel_scan"]),
+                    this_week_only=bool(attempt["this_week_only"]),
+                    min_source_duration=req.min_source_duration,
+                    max_results=int(attempt["max_results"]),
+                    posts_per_day=req.posts_per_day,
+                    reserve_count=req.reserve_count,
+                    slot_option_count=req.options_per_slot,
+                    log_fn=lambda msg: _append_daily_batch_log(batch_id, msg),
+                )
+                break
+            except Exception as attempt_exc:
+                err_text = str(attempt_exc)
+                plan_errors.append(err_text)
+                _append_daily_batch_log(
+                    batch_id,
+                    f"Fallo construyendo plan ({attempt['label']}): {err_text}",
+                )
+        if plan is None:
+            raise RuntimeError(" | ".join(plan_errors) or "plan_build_failed")
         serialized_plan = {
             "date": plan.get("date"),
             "timezone": plan.get("timezone"),
@@ -1518,6 +1551,20 @@ def _run_daily_review_batch(batch_id: str, req: DailyReviewBatchRequest) -> None
             slot_candidates.extend(entry.get("alternatives") or [])
 
             for candidate_idx, candidate in enumerate(slot_candidates, start=1):
+                if not isinstance(candidate, dict):
+                    _append_daily_batch_log(
+                        batch_id,
+                        f"Saltando candidato invalido en {slot_key or 'slot'} posicion {candidate_idx}.",
+                    )
+                    continue
+                source_title = str(candidate.get("title") or "").strip()
+                source_url = str(candidate.get("url") or "").strip()
+                if not source_title or not source_url:
+                    _append_daily_batch_log(
+                        batch_id,
+                        f"Saltando candidato incompleto en {slot_key or 'slot'} posicion {candidate_idx}.",
+                    )
+                    continue
                 items.append(
                     {
                         "item_key": f"{slot_key}:{candidate_idx}",
@@ -1528,9 +1575,9 @@ def _run_daily_review_batch(batch_id: str, req: DailyReviewBatchRequest) -> None
                         "publish_time": entry.get("publish_time"),
                         "strategy": entry.get("strategy"),
                         "plan_score": entry.get("plan_score"),
-                        "source_title": candidate.get("title"),
+                        "source_title": source_title,
                         "source_channel": candidate.get("channel"),
-                        "source_url": candidate.get("url"),
+                        "source_url": source_url,
                         "status": "pending",
                         "job_id": None,
                         "option_id": None,
