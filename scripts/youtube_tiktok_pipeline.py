@@ -129,6 +129,12 @@ TRANSCRIBE_IF_CAPTIONS_WEAK = os.getenv("TRANSCRIBE_IF_CAPTIONS_WEAK", "1").stri
     "no",
     "off",
 }
+TRANSCRIBE_PREFER_WHISPER = os.getenv("TRANSCRIBE_PREFER_WHISPER", "1").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
 WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "small").strip() or "small"
 WHISPER_COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "int8").strip() or "int8"
 WHISPER_MAX_SECONDS = max(120, int(os.getenv("WHISPER_MAX_SECONDS", "1500").strip() or "1500"))
@@ -139,6 +145,7 @@ SMART_FOCUS_ENABLED = os.getenv("SMART_FOCUS_ENABLED", "1").strip().lower() not 
     "off",
 }
 SMART_FOCUS_SAMPLE_STEP = max(0.75, float(os.getenv("SMART_FOCUS_SAMPLE_STEP", "2.0").strip() or "2.0"))
+TIKTOK_NATIVE_FILL_ZOOM = min(1.18, max(1.0, float(os.getenv("TIKTOK_NATIVE_FILL_ZOOM", "1.06").strip() or "1.06")))
 
 
 @dataclass
@@ -587,18 +594,24 @@ def load_best_caption_cues(
     else:
         log_fn("No hay subtitulos VTT disponibles.")
 
-    should_transcribe = (
+    prefer_whisper = (
         TRANSCRIBE_WITH_FASTER_WHISPER
-        and (
-            not parsed_cues
-            or (TRANSCRIBE_IF_CAPTIONS_WEAK and captions_look_weak(parsed_cues, source_duration))
-        )
+        and TRANSCRIBE_PREFER_WHISPER
+        and (source_duration is None or source_duration <= WHISPER_MAX_SECONDS)
+    )
+    should_transcribe = TRANSCRIBE_WITH_FASTER_WHISPER and (
+        prefer_whisper
+        or not parsed_cues
+        or (TRANSCRIBE_IF_CAPTIONS_WEAK and captions_look_weak(parsed_cues, source_duration))
     )
 
     if should_transcribe:
         try:
             max_seconds = int(source_duration) if source_duration else WHISPER_MAX_SECONDS
-            log_fn("Generando transcripcion propia con Whisper por calidad de captions.")
+            if prefer_whisper:
+                log_fn("Generando transcripcion propia con Whisper como fuente principal de subtitulos.")
+            else:
+                log_fn("Generando transcripcion propia con Whisper por calidad de captions.")
             whisper_cues = transcribe_with_faster_whisper(
                 ffmpeg_bin,
                 source_video,
@@ -766,10 +779,10 @@ def chunk_caption_words(text: str, cue_duration: float) -> List[str]:
     if _is_low_value_caption(words):
         return []
 
-    max_chunks_by_time = max(1, int(cue_duration / 0.55))
-    chunk_count_by_words = max(1, math.ceil(len(words) / 3))
+    max_chunks_by_time = max(1, int(cue_duration / 0.45))
+    chunk_count_by_words = max(1, math.ceil(len(words) / 2))
     chunk_count = min(max_chunks_by_time, chunk_count_by_words, 4, len(words))
-    words_per_chunk = max(1, math.ceil(len(words) / chunk_count))
+    words_per_chunk = min(4, max(1, math.ceil(len(words) / chunk_count)))
 
     chunks: List[str] = []
     for i in range(0, len(words), words_per_chunk):
@@ -779,7 +792,7 @@ def chunk_caption_words(text: str, cue_duration: float) -> List[str]:
             continue
         if _looks_broken_caption(chunk_words):
             continue
-        chunk_text = wrap_caption_lines(chunk_words, max_line_chars=18, max_lines=2).upper()
+        chunk_text = wrap_caption_lines(chunk_words, max_line_chars=14, max_lines=2).upper()
         if chunk_text:
             chunks.append(chunk_text)
     return chunks
@@ -1084,8 +1097,8 @@ def write_segment_ass(cues: List[CaptionCue], start: float, end: float, out_path
             "Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,"
             "Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,"
             "MarginR,MarginV,Encoding",
-            "Style: Hook,Arial,70,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,4,0,8,92,92,228,1",
-            "Style: Cap,Arial,60,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,4,0,2,88,88,520,1",
+            "Style: Hook,Arial,74,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,5,0,8,88,88,248,1",
+            "Style: Cap,Arial,68,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,5,0,2,84,84,430,1",
             "",
             "[Events]",
             "Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text",
@@ -1639,19 +1652,15 @@ def detect_subject_focus_x(
 
 def _foreground_compose_filter(output_width: int, output_height: int, focus_x: float | None = None) -> str:
     ratio = output_width / output_height
-    if focus_x is None:
-        return (
-            f"[0:v]scale={output_width}:{output_height}:force_original_aspect_ratio=decrease,"
-            "setsar=1[fg]"
-        )
-    safe_focus = min(0.82, max(0.18, float(focus_x)))
+    safe_focus = 0.5 if focus_x is None else min(0.82, max(0.18, float(focus_x)))
     ratio_str = f"{ratio:.6f}"
+    zoom_str = f"{TIKTOK_NATIVE_FILL_ZOOM:.4f}"
     return (
         "[0:v]crop="
-        f"w='if(gte(iw/ih,{ratio_str}),ih*{ratio_str},iw)':"
-        f"h='if(gte(iw/ih,{ratio_str}),ih,iw/{ratio_str})':"
-        f"x='if(gte(iw/ih,{ratio_str}),min(max(iw*{safe_focus:.4f}-(ih*{ratio_str})/2,0),iw-(ih*{ratio_str})),0)':"
-        f"y='if(gte(iw/ih,{ratio_str}),0,(ih-(iw/{ratio_str}))/2)',"
+        f"w='if(gte(iw/ih,{ratio_str}),min(iw,(ih*{ratio_str})/{zoom_str}),iw)':"
+        f"h='if(gte(iw/ih,{ratio_str}),ih,min(ih,(iw/{ratio_str})/{zoom_str}))':"
+        f"x='if(gte(iw/ih,{ratio_str}),min(max(iw*{safe_focus:.4f}-min(iw,(ih*{ratio_str})/{zoom_str})/2,0),iw-min(iw,(ih*{ratio_str})/{zoom_str})),0)':"
+        f"y='if(gte(iw/ih,{ratio_str}),0,(ih-min(ih,(iw/{ratio_str})/{zoom_str}))/2)',"
         f"scale={output_width}:{output_height},setsar=1[fg]"
     )
 
