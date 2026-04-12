@@ -1677,6 +1677,28 @@ def _foreground_compose_filter(output_width: int, output_height: int, focus_x: f
     )
 
 
+def _adaptive_compose_filter(output_width: int, output_height: int, focus_x: float | None = None) -> str:
+    ratio = output_width / output_height
+    safe_focus = 0.5 if focus_x is None else min(0.82, max(0.18, float(focus_x)))
+    ratio_str = f"{ratio:.6f}"
+    zoom_str = f"{TIKTOK_NATIVE_FILL_ZOOM:.4f}"
+    landscape_threshold = "1.20"
+    fg_width = int(output_width * 0.985)
+    return (
+        f"[0:v]scale={output_width}:{output_height}:force_original_aspect_ratio=increase,"
+        f"crop={output_width}:{output_height},boxblur=28:10,"
+        "eq=brightness=-0.08:saturation=0.82[bg];"
+        "[0:v]crop="
+        f"w='if(gte(iw/ih,{landscape_threshold}),iw,if(gte(iw/ih,{ratio_str}),min(iw,(ih*{ratio_str})/{zoom_str}),iw))':"
+        f"h='if(gte(iw/ih,{landscape_threshold}),ih,if(gte(iw/ih,{ratio_str}),ih,min(ih,(iw/{ratio_str})/{zoom_str})))':"
+        f"x='if(gte(iw/ih,{landscape_threshold}),0,if(gte(iw/ih,{ratio_str}),min(max(iw*{safe_focus:.4f}-min(iw,(ih*{ratio_str})/{zoom_str})/2,0),iw-min(iw,(ih*{ratio_str})/{zoom_str})),0))':"
+        f"y='if(gte(iw/ih,{landscape_threshold}),0,if(gte(iw/ih,{ratio_str}),0,(ih-min(ih,(iw/{ratio_str})/{zoom_str}))/2))',"
+        f"scale=w='if(gte(iw/ih,{landscape_threshold}),{fg_width},{output_width})':"
+        f"h='if(gte(iw/ih,{landscape_threshold}),-2,{output_height})',setsar=1[fg];"
+        "[bg][fg]overlay=x='(W-w)/2':y='(H-h)/2'[vpre]"
+    )
+
+
 def render_short(
     ffmpeg_bin: str,
     input_video: Path,
@@ -1704,7 +1726,7 @@ def render_short(
             "h='if(lt(t,0.45),1280*(1.04-0.04*t/0.45),1280)':"
             "eval=frame,crop=720:1280[vzoom]"
         )
-        fast_comp = _foreground_compose_filter(720, 1280, focus_x).replace("[fg]", "[vpre]")
+        fast_comp = _adaptive_compose_filter(720, 1280, focus_x)
         fast_chains = [fast_comp, fast_intro]
         fast_label = "[vzoom]"
         if subtitle_ass and subtitle_ass.exists():
@@ -1781,10 +1803,7 @@ def render_short(
         "h='if(lt(t,0.70),1920*(1.08-0.08*t/0.70),1920)':"
         "eval=frame,crop=1080:1920[vzoom]"
     )
-    base_comp = _foreground_compose_filter(1080, 1920, focus_x).replace(
-        ",setsar=1[fg]",
-        ",setsar=1,eq=contrast=1.05:saturation=1.10[vpre]",
-    )
+    base_comp = _adaptive_compose_filter(1080, 1920, focus_x)
     chains = [base_comp]
     chains.append(intro_transition)
     current_label = "[vzoom]"
@@ -1868,7 +1887,7 @@ def render_short(
         "h='if(lt(t,0.60),1280*(1.07-0.07*t/0.60),1280)':"
         "eval=frame,crop=720:1280[vzoom]"
     )
-    fallback_comp = _foreground_compose_filter(720, 1280, focus_x).replace("[fg]", "[vpre]")
+    fallback_comp = _adaptive_compose_filter(720, 1280, focus_x)
     fallback_chains = [fallback_comp]
     fallback_chains.append(fallback_intro)
     fallback_label = "[vzoom]"
