@@ -134,6 +134,7 @@ SCHEDULER_LANGUAGE = os.getenv("DAILY_REVIEW_LANGUAGE", "es").strip() or "es"
 SCHEDULER_MODE = os.getenv("DAILY_REVIEW_MODE", "creators_es").strip() or "creators_es"
 SCHEDULER_STATE_FILE = WORK_DIR / "daily_review_scheduler_state.json"
 PUBLISH_REQUESTS_FILE = DATA_DIR / "publish_requests.json"
+CARRYOVER_REQUESTS_FILE = DATA_DIR / "carryover_requests.json"
 RETENTION_ENABLED = os.getenv("GENERATED_MEDIA_RETENTION_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
 RETENTION_HOURS = max(1, int(os.getenv("GENERATED_MEDIA_RETENTION_HOURS", "24").strip() or "24"))
 RETENTION_OUTPUT_HOURS = max(
@@ -328,6 +329,8 @@ _jobs_lock = threading.Lock()
 _jobs: dict[str, dict[str, Any]] = {}
 _publish_lock = threading.Lock()
 _publish_requests: dict[str, dict[str, Any]] = {}
+_carryover_lock = threading.Lock()
+_carryover_requests: dict[str, dict[str, Any]] = {}
 _daily_batches_lock = threading.Lock()
 
 
@@ -359,6 +362,52 @@ def _load_publish_requests() -> None:
         restored[rid] = req
     with _publish_lock:
         _publish_requests = restored
+
+
+def _persist_carryover_requests_locked() -> None:
+    snapshot = {carryover_key: dict(payload) for carryover_key, payload in _carryover_requests.items()}
+    tmp_path = CARRYOVER_REQUESTS_FILE.with_suffix(CARRYOVER_REQUESTS_FILE.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp_path.replace(CARRYOVER_REQUESTS_FILE)
+
+
+def _load_carryover_requests() -> None:
+    global _carryover_requests
+    if not CARRYOVER_REQUESTS_FILE.exists():
+        return
+    try:
+        payload = json.loads(CARRYOVER_REQUESTS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    if not isinstance(payload, dict):
+        return
+    restored: dict[str, dict[str, Any]] = {}
+    for carryover_key, item in payload.items():
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("carryover_key") or carryover_key or "").strip()
+        if not key:
+            continue
+        item["carryover_key"] = key
+        restored[key] = item
+    with _carryover_lock:
+        _carryover_requests = restored
+
+
+def _get_carryover_snapshot() -> list[dict[str, Any]]:
+    with _carryover_lock:
+        items = [dict(item) for item in _carryover_requests.values()]
+    items.sort(key=lambda item: str(item.get("queued_at") or ""))
+    return items
+
+
+def _remove_carryover_request(carryover_key: str) -> None:
+    key = str(carryover_key or "").strip()
+    if not key:
+        return
+    with _carryover_lock:
+        if _carryover_requests.pop(key, None) is not None:
+            _persist_carryover_requests_locked()
 
 
 def _get_publish_request(request_id: str, *, reload_if_missing: bool = False) -> dict[str, Any] | None:
@@ -609,6 +658,7 @@ def _startup_tasks() -> None:
     backfill_recent_used_videos_from_output(OUTPUT_DIR)
     _load_scheduler_state()
     _load_publish_requests()
+    _load_carryover_requests()
     _ensure_telegram_poller_started()
     _ensure_daily_review_scheduler_started()
     _ensure_retention_cleanup_started()
@@ -955,14 +1005,119 @@ def _build_telegram_review_caption(job: dict[str, Any], option: dict[str, Any], 
     return "\n".join(lines)[:1000]
 
 
-def _build_review_reply_markup(request_id: str) -> str:
+def _infer_output_slug_from_option(option: dict[str, Any]) -> str:
+    candidates = [
+        str(option.get("manual_upload_url") or "").strip(),
+        str(option.get("preview_url") or "").strip(),
+        str(option.get("poster_url") or "").strip(),
+    ]
+    for raw in candidates:
+        if not raw:
+            continue
+        parsed = urlparse(raw)
+        path = parsed.path or raw
+        marker = "/output/"
+        if marker not in path:
+            continue
+        tail = path.split(marker, 1)[1].strip("/")
+        if not tail:
+            continue
+        return _safe_output_slug(tail.split("/", 1)[0])
+
+    file_candidates = [
+        str(option.get("manual_upload_file") or "").strip(),
+        str(option.get("poster_file") or "").strip(),
+    ]
+    output_root = OUTPUT_DIR.resolve()
+    for raw in file_candidates:
+        if not raw:
+            continue
+        try:
+            rel = Path(raw).resolve().relative_to(output_root)
+        except Exception:
+            continue
+        if rel.parts:
+            return _safe_output_slug(rel.parts[0])
+    return ""
+
+
+def _refresh_publish_reply_markup_for_request(req: dict[str, Any]) -> None:
+    message_id = req.get("telegram_message_id")
+    request_id = str(req.get("request_id") or "").strip()
+    if not message_id or not request_id:
+        return
+    data: dict[str, Any] = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "message_id": message_id,
+        "reply_markup": _build_review_reply_markup(request_id, carryover_queued=bool(req.get("queued_for_next_batch"))),
+    }
+    try:
+        _telegram_call("editMessageReplyMarkup", data=data, timeout=60)
+    except HTTPException:
+        pass
+
+
+def _queue_request_for_next_batch(request_id: str, req: dict[str, Any]) -> tuple[bool, str]:
+    option = req.get("option") if isinstance(req.get("option"), dict) else {}
+    output_slug = _infer_output_slug_from_option(option)
+    option_id = int(req.get("option_id") or option.get("option_id") or 0)
+    if not output_slug or option_id <= 0:
+        return False, "No pude localizar el clip para la siguiente tanda."
+
+    try:
+        safe_slug, result = _load_result_from_output_slug(output_slug)
+    except HTTPException as exc:
+        return False, f"No pude reutilizar este clip: {exc.detail}"
+
+    source_title = str(result.get("source_title") or "").strip()
+    source_channel = str(result.get("source_channel") or result.get("channel") or "").strip()
+    source_url = str(result.get("source_url") or "").strip()
+    carryover_key = f"{safe_slug}:{option_id}"
+    now_iso = _utc_now_iso()
+
+    with _carryover_lock:
+        existing = _carryover_requests.get(carryover_key)
+        if existing:
+            return False, "Ya estaba anadida a la siguiente tanda."
+        _carryover_requests[carryover_key] = {
+            "carryover_key": carryover_key,
+            "source_request_id": request_id,
+            "output_slug": safe_slug,
+            "option_id": option_id,
+            "source_title": source_title,
+            "source_channel": source_channel,
+            "source_url": source_url,
+            "queued_at": now_iso,
+        }
+        _persist_carryover_requests_locked()
+
+    with _publish_lock:
+        stored_req = _publish_requests.get(request_id)
+        if stored_req is not None:
+            stored_req["queued_for_next_batch"] = True
+            stored_req["carryover_key"] = carryover_key
+            stored_req["updated_at"] = now_iso
+            stored_req.setdefault("logs", []).append("Marcada para reaparecer en la siguiente tanda.")
+            _persist_publish_requests_locked()
+            req = dict(stored_req)
+
+    _refresh_publish_reply_markup_for_request(req)
+    return True, "Anadida a la siguiente tanda."
+
+
+def _build_review_reply_markup(request_id: str, *, carryover_queued: bool = False) -> str:
+    carryover_text = "Anadida a siguiente tanda" if carryover_queued else "Anadir a siguiente tanda"
+    carryover_action = "queued" if carryover_queued else "next"
     return json.dumps(
         {
             "inline_keyboard": [
                 [
                     {"text": "OK TikTok", "callback_data": f"ttok:{request_id}:ok"},
                     {"text": "Cancelar", "callback_data": f"ttok:{request_id}:no"},
-                ]
+                ],
+                [
+                    {"text": carryover_text, "callback_data": f"ttok:{request_id}:{carryover_action}"},
+                ],
             ]
         },
         ensure_ascii=False,
@@ -1240,6 +1395,24 @@ def _load_result_from_output_slug(output_slug: str) -> tuple[str, dict[str, Any]
     return safe_slug, result
 
 
+def _build_synthetic_job_from_output(safe_slug: str, result: dict[str, Any], option: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "job_id": f"output:{safe_slug}",
+        "status": "completed",
+        "created_at": _utc_now_iso(),
+        "updated_at": _utc_now_iso(),
+        "request": {
+            "url": result.get("source_url"),
+            "duration": int(round(float(option.get("duration") or 60))),
+            "options": len(result.get("options") or []),
+        },
+        "logs": [f"Revision generada desde output/{safe_slug}."],
+        "result": result,
+        "error": None,
+        "traceback": None,
+    }
+
+
 def _set_job_state(job_id: str, **updates: Any) -> None:
     with _jobs_lock:
         job = _jobs.get(job_id)
@@ -1287,6 +1460,8 @@ def _serialize_publish_request(req: dict[str, Any]) -> dict[str, Any]:
         "error": req.get("error"),
         "logs": req.get("logs", []),
         "option": req.get("option"),
+        "queued_for_next_batch": bool(req.get("queued_for_next_batch")),
+        "carryover_key": req.get("carryover_key"),
     }
 
 
@@ -1635,6 +1810,39 @@ def _run_daily_review_batch(batch_id: str, req: DailyReviewBatchRequest) -> None
             "reserves": [_serialize_plan_entry(item) for item in plan.get("reserves", [])],
         }
         items: list[dict[str, Any]] = []
+        carryover_items = _get_carryover_snapshot()
+        if carryover_items:
+            _append_daily_batch_log(
+                batch_id,
+                f"Reenviando {len(carryover_items)} clip(s) guardados junto con la tanda nueva.",
+            )
+        for carry_idx, carry in enumerate(carryover_items, start=1):
+            source_title = str(carry.get("source_title") or f"clip_guardado_{carry_idx}").strip()
+            items.append(
+                {
+                    "item_key": f"carryover:{carry.get('carryover_key')}",
+                    "review_group_id": f"carryover:{carry.get('carryover_key')}",
+                    "option_rank": 1,
+                    "slot_key": f"carryover:{carry_idx}",
+                    "slot_label": "Siguiente tanda",
+                    "publish_time": None,
+                    "strategy": "carryover",
+                    "plan_score": None,
+                    "source_title": source_title,
+                    "source_channel": carry.get("source_channel"),
+                    "source_url": carry.get("source_url"),
+                    "status": "pending",
+                    "job_id": None,
+                    "option_id": None,
+                    "telegram_message_id": None,
+                    "preview_url": None,
+                    "request_id": None,
+                    "error": None,
+                    "carryover_key": carry.get("carryover_key"),
+                    "output_slug": carry.get("output_slug"),
+                    "reuse_option_id": int(carry.get("option_id") or 0),
+                }
+            )
         for entry in serialized_plan["slots"]:
             slot_key = str(entry.get("slot_key") or "")
             slot_candidates = []
@@ -1703,65 +1911,97 @@ def _run_daily_review_batch(batch_id: str, req: DailyReviewBatchRequest) -> None
             slot_key = str(item.get("slot_key") or "")
             source_url = str(item.get("source_url") or "").strip()
             source_title = str(item.get("source_title") or source_url).strip()
-            if not source_url:
-                failed += 1
-                _update_daily_batch_item(batch_id, item_key, status="failed", error="slot_sin_url")
-                continue
+            carryover_key = str(item.get("carryover_key") or "").strip()
 
-            job_id = uuid.uuid4().hex
-            _update_daily_batch_item(batch_id, item_key, status="rendering", job_id=job_id)
-            _append_daily_batch_log(
-                batch_id,
-                f"Generando opcion {item.get('option_rank')}/"
-                f"{req.options_per_slot} para {item.get('slot_label')}: {source_title}",
-            )
-            with _jobs_lock:
-                _jobs[job_id] = {
-                    "job_id": job_id,
-                    "status": "pending",
-                    "created_at": _utc_now_iso(),
-                    "updated_at": _utc_now_iso(),
-                    "request": {
-                        "url": source_url,
-                        "duration": req.duration,
-                        "options": 1,
-                        "stride": req.stride,
-                        "overlap_ratio": req.overlap_ratio,
-                        "language": req.language,
-                        "fast_render": True,
-                    },
-                    "result": None,
-                    "error": None,
-                    "logs": [],
-                }
-            create_req = CreateJobRequest(
-                url=source_url,
-                duration=req.duration,
-                options=1,
-                stride=req.stride,
-                overlap_ratio=req.overlap_ratio,
-                language=req.language,
-                fast_render=True,
-            )
-            _run_job(job_id, create_req)
-            with _jobs_lock:
-                job = dict(_jobs.get(job_id) or {})
+            if carryover_key:
+                reuse_output_slug = str(item.get("output_slug") or "").strip()
+                reuse_option_id = int(item.get("reuse_option_id") or 0)
+                synthetic_job_id = f"output:{reuse_output_slug}" if reuse_output_slug else f"output:{carryover_key}"
+                _update_daily_batch_item(batch_id, item_key, status="reusing_output", job_id=synthetic_job_id)
+                _append_daily_batch_log(
+                    batch_id,
+                    f"Reenviando clip guardado para la siguiente tanda: {source_title}",
+                )
+                try:
+                    safe_slug, result = _load_result_from_output_slug(reuse_output_slug)
+                    options = result.get("options") or []
+                    option = next((opt for opt in options if int(opt.get("option_id") or 0) == reuse_option_id), None)
+                    if not option:
+                        raise HTTPException(status_code=404, detail="option_not_found")
+                    job = _build_synthetic_job_from_output(safe_slug, result, option)
+                    job_id = str(job["job_id"])
+                    with _jobs_lock:
+                        _jobs[job_id] = job
+                    source_url = str(result.get("source_url") or source_url).strip()
+                    source_title = str(result.get("source_title") or source_title).strip()
+                except HTTPException as exc:
+                    failed += 1
+                    err = str(exc.detail)
+                    _update_daily_batch_item(batch_id, item_key, status="failed", error=err)
+                    _append_daily_batch_log(batch_id, f"No pude reaprovechar {source_title}: {err}")
+                    if err in {"invalid_output_slug", "output_manifest_not_found", "option_not_found"}:
+                        _remove_carryover_request(carryover_key)
+                    continue
+            else:
+                if not source_url:
+                    failed += 1
+                    _update_daily_batch_item(batch_id, item_key, status="failed", error="slot_sin_url")
+                    continue
 
-            if job.get("status") != "completed" or not job.get("result"):
-                failed += 1
-                err = str(job.get("error") or "job_failed")
-                _update_daily_batch_item(batch_id, item_key, status="failed", error=err)
-                _append_daily_batch_log(batch_id, f"Fallo generando {source_title}: {err}")
-                continue
+                job_id = uuid.uuid4().hex
+                _update_daily_batch_item(batch_id, item_key, status="rendering", job_id=job_id)
+                _append_daily_batch_log(
+                    batch_id,
+                    f"Generando opcion {item.get('option_rank')}/"
+                    f"{req.options_per_slot} para {item.get('slot_label')}: {source_title}",
+                )
+                with _jobs_lock:
+                    _jobs[job_id] = {
+                        "job_id": job_id,
+                        "status": "pending",
+                        "created_at": _utc_now_iso(),
+                        "updated_at": _utc_now_iso(),
+                        "request": {
+                            "url": source_url,
+                            "duration": req.duration,
+                            "options": 1,
+                            "stride": req.stride,
+                            "overlap_ratio": req.overlap_ratio,
+                            "language": req.language,
+                            "fast_render": True,
+                        },
+                        "result": None,
+                        "error": None,
+                        "logs": [],
+                    }
+                create_req = CreateJobRequest(
+                    url=source_url,
+                    duration=req.duration,
+                    options=1,
+                    stride=req.stride,
+                    overlap_ratio=req.overlap_ratio,
+                    language=req.language,
+                    fast_render=True,
+                )
+                _run_job(job_id, create_req)
+                with _jobs_lock:
+                    job = dict(_jobs.get(job_id) or {})
 
-            result = job["result"]
-            options = result.get("options") or []
-            option = options[0] if options else None
-            if not option:
-                failed += 1
-                _update_daily_batch_item(batch_id, item_key, status="failed", error="sin_opciones")
-                _append_daily_batch_log(batch_id, f"{source_title}: el render no produjo opciones.")
-                continue
+                if job.get("status") != "completed" or not job.get("result"):
+                    failed += 1
+                    err = str(job.get("error") or "job_failed")
+                    _update_daily_batch_item(batch_id, item_key, status="failed", error=err)
+                    _append_daily_batch_log(batch_id, f"Fallo generando {source_title}: {err}")
+                    continue
+
+                result = job["result"]
+                options = result.get("options") or []
+                option = options[0] if options else None
+                if not option:
+                    failed += 1
+                    _update_daily_batch_item(batch_id, item_key, status="failed", error="sin_opciones")
+                    _append_daily_batch_log(batch_id, f"{source_title}: el render no produjo opciones.")
+                    continue
 
             try:
                 if _tiktok_enabled():
@@ -1791,6 +2031,8 @@ def _run_daily_review_batch(batch_id: str, req: DailyReviewBatchRequest) -> None
                         "creator_username": None,
                         "review_group_id": item.get("review_group_id"),
                         "review_group_label": f"{item.get('slot_label')} {item.get('publish_time')}".strip(),
+                        "queued_for_next_batch": False,
+                        "carryover_key": None,
                     }
                     with _publish_lock:
                         _publish_requests[request_id] = publish_payload
@@ -1811,6 +2053,8 @@ def _run_daily_review_batch(batch_id: str, req: DailyReviewBatchRequest) -> None
                     request_id=request_id,
                     error=None,
                 )
+                if carryover_key:
+                    _remove_carryover_request(carryover_key)
                 record_used_video(
                     source_url=source_url,
                     source_title=source_title,
@@ -2046,7 +2290,14 @@ def _process_telegram_callback(callback_query: dict[str, Any]) -> None:
         _telegram_call("answerCallbackQuery", data={"callback_query_id": callback_id, "text": "Solicitud no encontrada."}, timeout=30)
         return
 
+    if action == "queued":
+        _telegram_call("answerCallbackQuery", data={"callback_query_id": callback_id, "text": "Ya estaba anadida."}, timeout=30)
+        return
+
     if action == "no":
+        carryover_key = str(req.get("carryover_key") or "").strip()
+        if carryover_key:
+            _remove_carryover_request(carryover_key)
         _set_publish_state(request_id, status="cancelled")
         _append_publish_log(request_id, "Solicitud cancelada desde Telegram.")
         _append_log(req["job_id"], f"Solicitud TikTok cancelada para opcion {req['option_id']}.")
@@ -2058,6 +2309,14 @@ def _process_telegram_callback(callback_query: dict[str, Any]) -> None:
         current_status = (_publish_requests.get(request_id) or {}).get("status")
     if current_status != "pending_review":
         _telegram_call("answerCallbackQuery", data={"callback_query_id": callback_id, "text": "Ya procesado."}, timeout=30)
+        return
+
+    if action == "next":
+        added, message = _queue_request_for_next_batch(request_id, req)
+        _telegram_call("answerCallbackQuery", data={"callback_query_id": callback_id, "text": message[:180]}, timeout=30)
+        return
+    if action != "ok":
+        _telegram_call("answerCallbackQuery", data={"callback_query_id": callback_id, "text": "Accion no soportada."}, timeout=30)
         return
 
     sibling_reqs: list[dict[str, Any]] = []
@@ -2080,6 +2339,9 @@ def _process_telegram_callback(callback_query: dict[str, Any]) -> None:
     for sibling_req in sibling_reqs:
         _clear_publish_reply_markup_for_request(sibling_req)
 
+    carryover_key = str(req.get("carryover_key") or "").strip()
+    if carryover_key:
+        _remove_carryover_request(carryover_key)
     _set_publish_state(request_id, status="approved")
     _append_publish_log(request_id, "OK recibido desde Telegram.")
     _telegram_call("answerCallbackQuery", data={"callback_query_id": callback_id, "text": "Subiendo a TikTok..."}, timeout=30)
@@ -2516,6 +2778,8 @@ def prepare_tiktok_review(req: PrepareTikTokReviewRequest, request: Request) -> 
         "publish_id": None,
         "tiktok_status": None,
         "creator_username": None,
+        "queued_for_next_batch": False,
+        "carryover_key": None,
     }
     with _publish_lock:
         _publish_requests[request_id] = payload
@@ -2533,21 +2797,7 @@ def prepare_tiktok_review_from_output(req: PrepareTikTokReviewFromOutputRequest,
         raise HTTPException(status_code=404, detail="option_not_found")
 
     synthetic_job_id = f"output:{safe_slug}"
-    synthetic_job = {
-        "job_id": synthetic_job_id,
-        "status": "completed",
-        "created_at": _utc_now_iso(),
-        "updated_at": _utc_now_iso(),
-        "request": {
-            "url": result.get("source_url"),
-            "duration": int(round(float(option.get("duration") or 60))),
-            "options": len(options),
-        },
-        "logs": [f"Revision reabierta desde output/{safe_slug}."],
-        "result": result,
-        "error": None,
-        "traceback": None,
-    }
+    synthetic_job = _build_synthetic_job_from_output(safe_slug, result, option)
     with _jobs_lock:
         _jobs[synthetic_job_id] = synthetic_job
 
@@ -2570,6 +2820,8 @@ def prepare_tiktok_review_from_output(req: PrepareTikTokReviewFromOutputRequest,
         "tiktok_status": None,
         "creator_username": None,
         "review_group_id": f"output:{safe_slug}",
+        "queued_for_next_batch": False,
+        "carryover_key": None,
     }
     with _publish_lock:
         _publish_requests[request_id] = payload
