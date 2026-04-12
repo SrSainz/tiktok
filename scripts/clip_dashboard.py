@@ -243,22 +243,24 @@ AI_HOOK_TERMS = {
 }
 
 TOPIC_HASHTAG_RULES = [
-    (("mi vida", "ultimamente", "últimamente", "estos dias", "estos días", "update"), ["#vlog", "#update", "#storytime"]),
+    (("mi vida", "ultimamente", "ultimos dias", "ultimas semanas", "update"), ["#vlog", "#storytime", "#update"]),
     (("minecraft", "creeper", "survival", "mod"), ["#minecraft", "#gaming", "#survival"]),
     (("roblox",), ["#roblox", "#gaming", "#juegos"]),
     (("clash", "clash royale", "brawl", "brawl stars"), ["#gaming", "#mobilegaming", "#juegos"]),
     (("fortnite",), ["#fortnite", "#gaming", "#juegos"]),
-    (("fifa", "fc 25", "fc25", "fut", "gol"), ["#futbol", "#gaming", "#fc25"]),
+    (("fifa", "fc 25", "fc25", "fut", "gol", "partidazo"), ["#futbol", "#gaming", "#fc25"]),
     (("velada", "boxeo", "combate"), ["#boxeo", "#velada", "#combate"]),
-    (("entrevista", "podcast", "charla"), ["#podcast", "#entrevista", "#clips"]),
+    (("entrevista", "podcast", "charla"), ["#podcast", "#clips", "#ideas"]),
+    (("psicologia", "vender", "ventas", "marketing"), ["#ventas", "#marketing", "#negocios"]),
     (("historia", "curiosidad", "dato"), ["#curiosidades", "#datos", "#storytime"]),
-    (("viaje", "viaj", "hong kong", "china", "india", "japon", "tokio", "corea"), ["#viajes", "#vlog", "#curiosidades"]),
+    (("viaje", "viaj", "hong kong", "china", "india", "japon", "tokio", "corea", "qatar"), ["#viajes", "#vlog", "#curiosidades"]),
+    (("hong kong",), ["#hongkong", "#viajes", "#curiosidades"]),
+    (("india",), ["#india", "#viajes", "#vlog"]),
     (("mcdonald", "comida", "restaurante", "kebab", "pizza", "burger"), ["#comida", "#vlog", "#curiosidades"]),
-    (("coche", "regale", "regalé", "sueños", "suenos"), ["#regalo", "#vlog", "#momentazo"]),
+    (("coche", "regale", "suenos", "regalo"), ["#regalo", "#vlog", "#momentazo"]),
     (("reto", "24 horas", "24h", "supervivencia"), ["#reto", "#viral", "#momentazo"]),
     (("dinero", "negocio", "empresa", "millon", "millonario"), ["#dinero", "#negocios", "#mentalidad"]),
 ]
-
 
 SIGNAL_HASHTAG_RULES = {
     "Pregunta": ["#debate", "#opinion"],
@@ -286,6 +288,44 @@ THEME_REACTION_RULES = [
     (("boxeo", "velada", "combate"), "Tiene pinta de momento para comentarlo entero con amigos."),
     (("dinero", "negocio", "empresa", "millon", "millonario"), "Aquí hay un detalle que te hace replantearte la historia."),
 ]
+
+CONTENT_VERTICAL_RULES = [
+    ("travel", ("hong kong", "china", "india", "qatar", "japon", "tokio", "corea", "viaje", "viajes", "callejera", "spa")),
+    ("food", ("comida", "restaurante", "kebab", "pizza", "burger", "mcdonald")),
+    ("podcast", ("podcast", "entrevista", "charla", "te contare", "te contar", "21 minutos", "wild project")),
+    ("business", ("psicologia", "vender", "ventas", "negocio", "empresa", "millon", "millonario", "mentalidad", "dinero")),
+    ("challenge", ("reto", "24 horas", "24h", "supervivencia", "aguanto", "desafio")),
+    ("prank", ("broma", "bromas", "calle", "regale", "regalo", "suenos")),
+    ("sports", ("partidazo", "gol", "futbol", "boxeo", "velada", "combate", "latam", "espana")),
+    ("gaming", ("minecraft", "roblox", "fortnite", "clash", "brawl", "fifa", "fc25", "mrbeast", "wipeout")),
+    ("vlog", ("mi vida", "ultimamente", "ultimos dias", "ultimas semanas", "update")),
+]
+
+VERTICAL_CAPTION_REACTIONS = {
+    "travel": "Lo mejor de estos videos es el detalle cotidiano que aqui se siente surrealista.",
+    "food": "Entre hambre y curiosidad, este tipo de clip siempre entra solo.",
+    "podcast": "La gracia de este corte es que deja una idea clara y otra para discutirla un rato.",
+    "business": "Tiene una idea util y otra bastante debatible, que es justo lo que engancha.",
+    "challenge": "Se nota rapido que la situacion se va a torcer mas de la cuenta.",
+    "prank": "La reaccion es medio caos y medio risa, que es lo que hace que funcione.",
+    "sports": "Tiene ese punto de tension que hace que quieras ver el remate hasta el final.",
+    "gaming": "Entra directo en la parte con mas pique y se entiende al vuelo aunque no hayas visto todo.",
+    "vlog": "Resume muy bien el video y tiene ese detalle que hace quedarte unos segundos mas.",
+    "generic": "Entra rapido, se entiende facil y deja algo para comentar.",
+}
+
+VERTICAL_SUMMARY_TAILS = {
+    "travel": "y hay un detalle que se te queda rondando",
+    "food": "y lo mejor es lo normal que lo cuentan",
+    "podcast": "y justo aqui esta la parte que mejor se queda",
+    "business": "y hay una idea aqui que entra rapido",
+    "challenge": "y en este tramo es donde empieza a liarse",
+    "prank": "y aqui esta la reaccion que mejor vende el momento",
+    "sports": "y en este tramo esta la parte mas comentable",
+    "gaming": "y aqui esta justo la parte que mas pica",
+    "vlog": "y este corte resume muy bien el video",
+    "generic": "y este corte es de lo mas facil de ver",
+}
 
 SOCIAL_BAD_EDGE_WORDS = {
     "a",
@@ -488,15 +528,24 @@ def _looks_noisy_title(text: str) -> bool:
     return False
 
 
+def _keyword_present(haystack: str, keyword: str) -> bool:
+    token = keyword.strip().lower()
+    if not token:
+        return False
+    if " " in token:
+        return token in haystack
+    return re.search(rf"\b{re.escape(token)}\b", haystack) is not None
+
+
 def _build_topic_hashtags(*texts: str, signal_tags: List[str] | None = None) -> List[str]:
     haystack = " ".join(
-        _clean_social_text(text, allow_punctuation=False).lower()
+        _clean_social_text(_strip_clip_prefix(text), allow_punctuation=False).lower()
         for text in texts
         if text
     ).strip()
     hashtags: List[str] = []
     for keywords, tags in TOPIC_HASHTAG_RULES:
-        if any(keyword in haystack for keyword in keywords):
+        if any(_keyword_present(haystack, keyword) for keyword in keywords):
             hashtags.extend(tags)
     for tag in signal_tags or []:
         hashtags.extend(SIGNAL_HASHTAG_RULES.get(tag, []))
@@ -541,20 +590,22 @@ def _channel_hashtag(source_channel: str) -> str:
     return slug.lower()
 
 
+def _detect_content_vertical(*texts: str) -> str:
+    haystack = " ".join(
+        _clean_social_text(_strip_clip_prefix(text), allow_punctuation=False).lower()
+        for text in texts
+        if text
+    ).strip()
+    for vertical, keywords in CONTENT_VERTICAL_RULES:
+        if any(_keyword_present(haystack, keyword) for keyword in keywords):
+            return vertical
+    return "generic"
+
+
 def _build_caption_cta(signal_tags: List[str], hook: str, why_it_may_work: str) -> str:
-    hook_clean = _strip_clip_prefix(hook)
-    why_clean = _strip_clip_prefix(why_it_may_work)
     if "Pregunta" in signal_tags:
-        return "Yo aqui no lo tenia nada claro."
-    if "Dato" in signal_tags or re.search(r"\b\d+\b", hook_clean):
-        return "Hay un detalle que cambia todo."
-    if "Impacto" in signal_tags:
-        return "El giro llega antes de lo que parece."
-    if why_clean:
-        why_clean = _truncate_copy(why_clean, 80)
-        if why_clean:
-            return why_clean[0].upper() + why_clean[1:]
-    return "Tiene ese punto que te hace quedarte."
+        return "Tu aqui que habrias hecho?"
+    return ""
 
 
 def _build_caption_reaction(
@@ -565,21 +616,21 @@ def _build_caption_reaction(
     transcript_preview: str,
     signal_tags: List[str],
 ) -> str:
-    haystack = " ".join(
-        _clean_social_text(text, allow_punctuation=False).lower()
-        for text in (source_title, hook, short_description, transcript_preview)
-        if text
-    ).strip()
-    for keywords, reaction in THEME_REACTION_RULES:
-        if any(keyword in haystack for keyword in keywords):
-            return reaction
+    vertical = _detect_content_vertical(source_title, hook, short_description, transcript_preview)
+    base = VERTICAL_CAPTION_REACTIONS.get(vertical, VERTICAL_CAPTION_REACTIONS["generic"])
+    if vertical in {"travel", "food", "business", "podcast", "vlog"}:
+        if "Pregunta" in signal_tags and vertical in {"podcast", "business"}:
+            return "Es de esas ideas que te dejan pensando mas de la cuenta."
+        if "Dato" in signal_tags and vertical in {"travel", "food"}:
+            return "Lo mejor es el detalle que cuentan como si fuera lo mas normal del mundo."
+        return base
+    if "Impacto" in signal_tags and vertical in {"sports", "gaming", "challenge", "prank"}:
+        return "Se ve venir el momentazo y aun asi entra mejor de lo que esperas."
     if "Pregunta" in signal_tags:
-        return "Yo aquí habría discutido esto un buen rato."
+        return "Tu aqui seguramente tambien te pararias a opinar."
     if "Dato" in signal_tags:
         return "Lo mejor es el detalle que sueltan casi sin avisar."
-    if "Impacto" in signal_tags:
-        return "Se nota rápido que aquí viene un momentazo."
-    return "Tiene ese punto de resumen rápido que entra fácil y deja tema."
+    return base
 
 
 def _build_thematic_summary(
@@ -588,6 +639,15 @@ def _build_thematic_summary(
     source_title: str,
     short_description: str,
 ) -> str:
+    vertical = _detect_content_vertical(title, source_title, short_description)
+    source_clean = _truncate_copy(_strip_clip_prefix(source_title), 90).rstrip(" .")
+    if source_clean and not _looks_fragmentary_social_lead(source_clean):
+        if _norm_text(source_clean) != _norm_text(title):
+            return _sentence_case(source_clean)
+        if len(_social_tokens(source_clean)) >= 4:
+            tail = VERTICAL_SUMMARY_TAILS.get(vertical, VERTICAL_SUMMARY_TAILS["generic"])
+            return _truncate_copy(f"{source_clean} {tail}", 96).rstrip(" .")
+
     pieces = _extract_social_snippets(f"{title}. {short_description}. {source_title}")
     for piece in pieces:
         clean = _truncate_copy(_strip_clip_prefix(piece), 90).rstrip(" .")
@@ -612,7 +672,7 @@ def _source_channel_line(source_channel: str, title: str) -> str:
     blocked = ("records", "official", "studios", "topic", "trailers", "pictures", "music")
     if any(token in channel.lower() for token in blocked):
         return ""
-    return f"Visto en {channel}."
+    return f"Clip de {channel}."
 
 
 def _social_tokens(text: str) -> List[str]:
@@ -767,8 +827,13 @@ def _select_social_title(
     transcript_preview: str,
     signal_tags: List[str],
 ) -> str:
-    natural_source_title = _truncate_copy(_strip_clip_prefix(source_title or ""), 72)
-    if natural_source_title and len(_social_tokens(natural_source_title)) >= 2:
+    natural_source_title = _truncate_copy(_strip_clip_prefix(source_title or ""), 72).rstrip(" .")
+    if (
+        natural_source_title
+        and len(_social_tokens(natural_source_title)) >= 3
+        and not _looks_noisy_title(natural_source_title)
+        and _content_token_count(_social_tokens(natural_source_title)) >= 2
+    ):
         return natural_source_title
 
     focus_title = _strip_clip_prefix(extract_hook_focus_text(f"{short_description}. {transcript_preview}. {hook}"))
@@ -778,7 +843,7 @@ def _select_social_title(
 
     scored: List[tuple[float, str]] = []
     for candidate in _dedupe_keep_order(raw_candidates):
-        clean = _truncate_copy(_strip_clip_prefix(candidate), 72)
+        clean = _truncate_copy(_strip_clip_prefix(candidate), 72).rstrip(" .")
         if not clean:
             continue
         scored.append(
@@ -792,10 +857,10 @@ def _select_social_title(
     if scored and scored[0][0] > -50:
         return scored[0][1]
 
-    fallback = _truncate_copy(_strip_clip_prefix(short_description or source_title or hook or "Clip viral del dia"), 72)
+    fallback = _truncate_copy(_strip_clip_prefix(short_description or source_title or hook or "Clip viral del dia"), 72).rstrip(" .")
     if fallback and not _looks_fragmentary_social_lead(fallback):
         return fallback
-    return _truncate_copy(_strip_clip_prefix(source_title or "Clip viral del dia"), 72)
+    return _truncate_copy(_strip_clip_prefix(source_title or "Clip viral del dia"), 72).rstrip(" .")
 
 
 def build_tiktok_copy(
@@ -816,15 +881,17 @@ def build_tiktok_copy(
         transcript_preview=transcript_preview,
         signal_tags=signal_tags,
     )
-    title = _sentence_case(title).rstrip(" .")
-    if title and title[-1] not in "!?" and (len(title.split()) > 3 or len(title) > 28):
-        title = f"{title}..."
+    title = _sentence_case(_truncate_copy(title, 72)).rstrip(" .")
 
-    summary_line = _build_thematic_summary(
-        title=title,
-        source_title=source_title,
-        short_description=short_description,
-    )
+    source_title_clean = _truncate_copy(_strip_clip_prefix(source_title or ""), 72).rstrip(" .")
+    summary_line = ""
+    if len(_social_tokens(title)) < 4 or len(title) < 18:
+        summary_line = _build_thematic_summary(
+            title=title,
+            source_title=source_title,
+            short_description=short_description,
+        )
+
     reaction_line = _build_caption_reaction(
         source_title=source_title,
         hook=hook,
@@ -832,24 +899,28 @@ def build_tiktok_copy(
         transcript_preview=transcript_preview,
         signal_tags=signal_tags,
     )
+    cta_line = _build_caption_cta(signal_tags, hook, why_it_may_work)
+
     caption_parts: List[str] = []
-    if summary_line:
+    if summary_line and _norm_text(summary_line) not in _norm_text(title):
         caption_parts.append(summary_line)
     if reaction_line and _norm_text(reaction_line) not in _norm_text(" ".join(caption_parts)):
         caption_parts.append(reaction_line)
+    if cta_line and _norm_text(cta_line) not in _norm_text(" ".join(caption_parts)):
+        caption_parts.append(cta_line)
     source_line = _source_channel_line(source_channel, title)
     if source_line and _norm_text(source_line) not in _norm_text(" ".join(caption_parts)):
         caption_parts.append(source_line)
+
     caption = ""
-    for idx, part in enumerate(part.strip() for part in caption_parts if part):
+    for part in (part.strip() for part in caption_parts if part):
         if not caption:
             caption = part
             continue
-        separator = " "
-        if caption[-1] not in ".!?":
-            separator = ". "
+        separator = " " if caption[-1] in ".!?" else ". "
         caption = f"{caption}{separator}{part}"
     caption = _truncate_copy(caption, 170)
+
     hashtags = _build_topic_hashtags(
         source_title,
         source_channel,
@@ -862,6 +933,10 @@ def build_tiktok_copy(
     channel_hashtag = _channel_hashtag(source_channel)
     if channel_hashtag and channel_hashtag not in hashtags:
         hashtags = [channel_hashtag, *hashtags]
+    preferred_specific_tags = ["#hongkong", "#india", "#qatar", "#podcast", "#ventas", "#marketing", "#bromas", "#calle"]
+    for preferred in reversed(preferred_specific_tags):
+        if preferred in hashtags:
+            hashtags = [preferred if tag == preferred else tag for tag in [preferred, *[item for item in hashtags if item != preferred]]]
     hashtags = _dedupe_keep_order(hashtags)[:4]
     return title, caption, hashtags
 
