@@ -376,11 +376,14 @@ def _upload_via_selenium_cdp(
     auto_post: bool,
     manual_wait: int,
 ) -> dict[str, str]:
+    import time
+
     try:
         from selenium import webdriver
         from selenium.webdriver.chrome.options import Options
         from selenium.webdriver.common.action_chains import ActionChains
         from selenium.webdriver.common.by import By
+        from selenium.webdriver.common.keys import Keys
         from selenium.webdriver.support.ui import WebDriverWait
         from selenium.webdriver.support import expected_conditions as EC
     except Exception as exc:
@@ -471,55 +474,64 @@ def _upload_via_selenium_cdp(
         caption_value = _normalize_caption_for_editor(raw_caption)
         if not caption_value:
             return True
-        box = _find_caption_box()
-        if box is None:
-            return False
         strategies = [
-            lambda: driver.execute_script(
-                """
-                const el = arguments[0];
-                const value = arguments[1];
-                el.focus();
-                const range = document.createRange();
-                range.selectNodeContents(el);
-                const selection = window.getSelection();
-                selection.removeAllRanges();
-                selection.addRange(range);
-                try { document.execCommand('delete', false); } catch (e) {}
-                el.innerHTML = '';
-                el.textContent = value;
-                el.dispatchEvent(new InputEvent('input', {bubbles: true, data: value, inputType: 'insertText'}));
-                el.dispatchEvent(new Event('change', {bubbles: true}));
-                """,
-                box,
-                caption_value,
-            ),
-            lambda: (
-                box.click(),
-                box.send_keys("\ue009", "a"),
-                box.send_keys("\ue003"),
-                box.send_keys(caption_value),
-            ),
-            lambda: (
+            lambda el: (
+                el.click(),
                 ActionChains(driver)
-                .move_to_element(box)
-                .click(box)
-                .key_down("\ue009")
+                .move_to_element(el)
+                .click(el)
+                .key_down(Keys.CONTROL)
                 .send_keys("a")
-                .key_up("\ue009")
-                .send_keys("\ue003")
+                .key_up(Keys.CONTROL)
+                .send_keys(Keys.BACKSPACE)
                 .send_keys(caption_value)
                 .perform()
             ),
+            lambda el: (
+                el.click(),
+                el.send_keys(Keys.CONTROL, "a"),
+                el.send_keys(Keys.BACKSPACE),
+                el.send_keys(caption_value),
+            ),
+            lambda el: (
+                driver.execute_script(
+                    """
+                    const el = arguments[0];
+                    const value = arguments[1];
+                    el.focus();
+                    const range = document.createRange();
+                    range.selectNodeContents(el);
+                    const selection = window.getSelection();
+                    selection.removeAllRanges();
+                    selection.addRange(range);
+                    try { document.execCommand('delete', false); } catch (e) {}
+                    el.innerHTML = '';
+                    el.textContent = value;
+                    el.dispatchEvent(new InputEvent('input', {bubbles: true, data: value, inputType: 'insertText'}));
+                    el.dispatchEvent(new Event('change', {bubbles: true}));
+                    """,
+                    el,
+                    caption_value,
+                )
+            ),
         ]
-        for strategy in strategies:
-            try:
-                strategy()
-            except Exception:
+
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            box = _find_caption_box()
+            if box is None:
+                time.sleep(0.6)
                 continue
-            editor_text = _extract_selenium_caption_text(driver, box)
-            if _text_contains_caption_sample(editor_text, caption_value):
-                return True
+            for strategy in strategies:
+                try:
+                    strategy(box)
+                except Exception:
+                    continue
+                time.sleep(0.6)
+                editor_text = _extract_selenium_caption_text(driver, _find_caption_box() or box)
+                if _text_contains_caption_sample(editor_text, caption_value):
+                    return True
+            time.sleep(0.8)
         return False
 
     try:
@@ -588,6 +600,8 @@ def _upload_via_selenium_cdp(
         log(f"Video cargado (selenium:{selector or 'input'}): {video_path.name}")
 
         wait.until(lambda d: "upload" in (d.current_url or "") or len(d.find_elements(By.CSS_SELECTOR, "[data-e2e='video_visibility_container']")) > 0)
+        wait.until(lambda d: _find_caption_box() is not None)
+        time.sleep(2.0)
 
         if caption:
             caption_value = caption[:2200]
