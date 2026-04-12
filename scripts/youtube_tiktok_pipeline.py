@@ -145,7 +145,7 @@ SMART_FOCUS_ENABLED = os.getenv("SMART_FOCUS_ENABLED", "1").strip().lower() not 
     "off",
 }
 SMART_FOCUS_SAMPLE_STEP = max(0.75, float(os.getenv("SMART_FOCUS_SAMPLE_STEP", "2.0").strip() or "2.0"))
-TIKTOK_NATIVE_FILL_ZOOM = min(1.18, max(1.0, float(os.getenv("TIKTOK_NATIVE_FILL_ZOOM", "1.06").strip() or "1.06")))
+TIKTOK_NATIVE_FILL_ZOOM = min(1.22, max(1.0, float(os.getenv("TIKTOK_NATIVE_FILL_ZOOM", "1.14").strip() or "1.14")))
 BURNED_HOOK_ENABLED = os.getenv("BURNED_HOOK_ENABLED", "0").strip().lower() in {
     "1",
     "true",
@@ -791,10 +791,10 @@ def chunk_caption_words(text: str, cue_duration: float) -> List[str]:
     if _is_low_value_caption(words):
         return []
 
-    max_chunks_by_time = max(1, int(cue_duration / 0.45))
-    chunk_count_by_words = max(1, math.ceil(len(words) / 2))
+    max_chunks_by_time = max(1, int(cue_duration / 0.35))
+    chunk_count_by_words = max(1, math.ceil(len(words) / 1.6))
     chunk_count = min(max_chunks_by_time, chunk_count_by_words, 4, len(words))
-    words_per_chunk = min(4, max(1, math.ceil(len(words) / chunk_count)))
+    words_per_chunk = min(3, max(1, math.ceil(len(words) / chunk_count)))
 
     chunks: List[str] = []
     for i in range(0, len(words), words_per_chunk):
@@ -804,7 +804,7 @@ def chunk_caption_words(text: str, cue_duration: float) -> List[str]:
             continue
         if _looks_broken_caption(chunk_words):
             continue
-        chunk_text = wrap_caption_lines(chunk_words, max_line_chars=14, max_lines=2).upper()
+        chunk_text = wrap_caption_lines(chunk_words, max_line_chars=11, max_lines=2).upper()
         if chunk_text:
             chunks.append(chunk_text)
     return chunks
@@ -1109,8 +1109,8 @@ def write_segment_ass(cues: List[CaptionCue], start: float, end: float, out_path
             "Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,"
             "Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,"
             "MarginR,MarginV,Encoding",
-            "Style: Hook,Arial,72,&H00FFFFFF,&H00FFFFFF,&H00000000,&H64000000,1,0,0,0,100,100,0,0,3,0,0,8,88,88,270,1",
-            "Style: Cap,Arial,76,&H00FFFFFF,&H00FFFFFF,&H00000000,&H64000000,1,0,0,0,100,100,0,0,3,0,0,2,72,72,240,1",
+            "Style: Hook,Arial,72,&H00FFFFFF,&H00FFFFFF,&H00000000,&H90000000,1,0,0,0,100,100,0,0,3,0,0,8,88,88,270,1",
+            "Style: Cap,Arial Black,92,&H00FFFFFF,&H00FFFFFF,&H00000000,&HA0000000,1,0,0,0,100,100,0,0,3,0,0,2,68,68,170,1",
             "",
             "[Events]",
             "Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text",
