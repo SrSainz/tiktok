@@ -1286,6 +1286,7 @@ def _serialize_publish_request(req: dict[str, Any]) -> dict[str, Any]:
         "publish_id": req.get("publish_id"),
         "error": req.get("error"),
         "logs": req.get("logs", []),
+        "option": req.get("option"),
     }
 
 

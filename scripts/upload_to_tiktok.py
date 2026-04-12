@@ -160,6 +160,17 @@ def _is_effectively_disabled(*values: str | None) -> bool:
     return False
 
 
+def _normalize_caption_for_editor(caption: str) -> str:
+    return (caption or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+
+
+def _body_contains_caption_sample(raw_body: str, caption_value: str) -> bool:
+    sample = _normalize_text(caption_value[:40])
+    if not sample:
+        return False
+    return sample in _normalize_text(raw_body or "")
+
+
 def _pick_existing_upload_page(context):
     candidates = []
     for page in context.pages:
@@ -181,6 +192,71 @@ def _pick_existing_upload_page(context):
         return None
     candidates.sort(key=lambda row: row[0], reverse=True)
     return candidates[0][1]
+
+
+def _set_playwright_caption(page, raw_caption: str) -> bool:
+    caption_value = _normalize_caption_for_editor(raw_caption)
+    if not caption_value:
+        return True
+    selectors = [
+        "[data-e2e='video-caption-editor'] [contenteditable='true']",
+        "div[contenteditable='true']",
+        "div[contenteditable='plaintext-only']",
+    ]
+    for selector in selectors:
+        try:
+            caption_box = page.locator(selector).first
+            if caption_box.count() == 0:
+                continue
+            caption_box.click(timeout=15000)
+            try:
+                caption_box.press("Control+A", timeout=3000)
+                caption_box.press("Backspace", timeout=3000)
+            except Exception:
+                pass
+            try:
+                page.evaluate(
+                    """
+                    ([selector, value]) => {
+                      const el = document.querySelector(selector);
+                      if (!el) return false;
+                      el.focus();
+                      const range = document.createRange();
+                      range.selectNodeContents(el);
+                      const selection = window.getSelection();
+                      selection.removeAllRanges();
+                      selection.addRange(range);
+                      try { document.execCommand('delete', false); } catch (e) {}
+                      el.innerHTML = '';
+                      el.textContent = value;
+                      el.dispatchEvent(new InputEvent('input', {bubbles: true, data: value, inputType: 'insertText'}));
+                      el.dispatchEvent(new Event('change', {bubbles: true}));
+                      return true;
+                    }
+                    """,
+                    [selector, caption_value],
+                )
+            except Exception:
+                pass
+            try:
+                body_text = page.locator("body").inner_text(timeout=2000)
+            except Exception:
+                body_text = ""
+            if _body_contains_caption_sample(body_text, caption_value):
+                return True
+            try:
+                caption_box.click(timeout=5000)
+                page.keyboard.press("Control+A")
+                page.keyboard.press("Backspace")
+                page.keyboard.insert_text(caption_value)
+                body_text = page.locator("body").inner_text(timeout=2000)
+            except Exception:
+                body_text = ""
+            if _body_contains_caption_sample(body_text, caption_value):
+                return True
+        except Exception:
+            continue
+    return False
 
 
 def _find_first_button(page, names):
@@ -324,6 +400,80 @@ def _upload_via_selenium_cdp(
                 continue
         return False
 
+    def _find_caption_box():
+        selectors = [
+            "[data-e2e='video-caption-editor'] [contenteditable='true']",
+            "div[contenteditable='true']",
+            "div[contenteditable='plaintext-only']",
+        ]
+        for selector in selectors:
+            for element in driver.find_elements(By.CSS_SELECTOR, selector):
+                try:
+                    if not element.is_displayed():
+                        continue
+                except Exception:
+                    continue
+                return element
+        return None
+
+    def _set_caption_safely(raw_caption: str) -> bool:
+        caption_value = _normalize_caption_for_editor(raw_caption)
+        if not caption_value:
+            return True
+        box = _find_caption_box()
+        if box is None:
+            return False
+        strategies = [
+            lambda: driver.execute_script(
+                """
+                const el = arguments[0];
+                const value = arguments[1];
+                el.focus();
+                const range = document.createRange();
+                range.selectNodeContents(el);
+                const selection = window.getSelection();
+                selection.removeAllRanges();
+                selection.addRange(range);
+                try { document.execCommand('delete', false); } catch (e) {}
+                el.innerHTML = '';
+                el.textContent = value;
+                el.dispatchEvent(new InputEvent('input', {bubbles: true, data: value, inputType: 'insertText'}));
+                el.dispatchEvent(new Event('change', {bubbles: true}));
+                """,
+                box,
+                caption_value,
+            ),
+            lambda: (
+                box.click(),
+                box.send_keys("\ue009", "a"),
+                box.send_keys("\ue003"),
+                box.send_keys(caption_value),
+            ),
+            lambda: (
+                ActionChains(driver)
+                .move_to_element(box)
+                .click(box)
+                .key_down("\ue009")
+                .send_keys("a")
+                .key_up("\ue009")
+                .send_keys("\ue003")
+                .send_keys(caption_value)
+                .perform()
+            ),
+        ]
+        for strategy in strategies:
+            try:
+                strategy()
+            except Exception:
+                continue
+            try:
+                body = driver.find_element(By.TAG_NAME, "body").text
+            except Exception:
+                body = ""
+            if _body_contains_caption_sample(body, caption_value):
+                return True
+        return False
+
     try:
         log(f"Conectado a navegador existente por Selenium/CDP: {debugger_address}")
         upload_url = "https://www.tiktok.com/tiktokstudio/upload?lang=es"
@@ -392,24 +542,9 @@ def _upload_via_selenium_cdp(
         wait.until(lambda d: "upload" in (d.current_url or "") or len(d.find_elements(By.CSS_SELECTOR, "[data-e2e='video_visibility_container']")) > 0)
 
         if caption:
-            try:
-                caption_box = wait.until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, "div[contenteditable='true']"))
-                )
-                driver.execute_script(
-                    """
-                    const el = arguments[0];
-                    const value = arguments[1];
-                    el.focus();
-                    el.innerHTML = '';
-                    el.textContent = value;
-                    el.dispatchEvent(new InputEvent('input', {bubbles: true, data: value, inputType: 'insertText'}));
-                    el.dispatchEvent(new Event('change', {bubbles: true}));
-                    """,
-                    caption_box,
-                    caption[:2200],
-                )
-            except Exception:
+            if _set_caption_safely(caption[:2200]):
+                log(f"Caption aplicado ({len(caption[:2200])} chars).")
+            else:
                 log("No se pudo autocompletar caption; revisa manualmente.")
 
         if privacy_level:
@@ -596,12 +731,9 @@ def upload(
         page.wait_for_timeout(1500)
 
         if caption:
-            try:
-                caption_box = page.locator("div[contenteditable='true']").first
-                caption_box.click(timeout=15000)
-                caption_box.fill("")
-                page.keyboard.insert_text(caption[:2200])
-            except Exception:
+            if _set_playwright_caption(page, caption[:2200]):
+                log(f"Caption aplicado ({len(caption[:2200])} chars).")
+            else:
                 log("No se pudo autocompletar caption; revisa manualmente.")
 
         if privacy_level:
