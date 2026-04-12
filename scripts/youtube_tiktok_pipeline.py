@@ -19,6 +19,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 import unicodedata
 from dataclasses import dataclass
@@ -116,6 +117,29 @@ CAPTION_NOISE_LABELS = {
 
 CAPTION_KEEP_SHORT_WORDS = {"o", "u", "y", "vs", "no", "si"}
 
+TRANSCRIBE_WITH_FASTER_WHISPER = os.getenv("TRANSCRIBE_WITH_FASTER_WHISPER", "1").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
+TRANSCRIBE_IF_CAPTIONS_WEAK = os.getenv("TRANSCRIBE_IF_CAPTIONS_WEAK", "1").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
+WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "small").strip() or "small"
+WHISPER_COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "int8").strip() or "int8"
+WHISPER_MAX_SECONDS = max(120, int(os.getenv("WHISPER_MAX_SECONDS", "1500").strip() or "1500"))
+SMART_FOCUS_ENABLED = os.getenv("SMART_FOCUS_ENABLED", "1").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
+SMART_FOCUS_SAMPLE_STEP = max(0.75, float(os.getenv("SMART_FOCUS_SAMPLE_STEP", "2.0").strip() or "2.0"))
+
 
 @dataclass
 class VideoCandidate:
@@ -149,6 +173,10 @@ class SegmentChoice:
 
 def log(message: str) -> None:
     print(f"[pipeline] {message}")
+
+
+_WHISPER_MODEL_CACHE = None
+_FACE_CASCADE_CACHE = None
 
 
 def _cookiefile_from_env() -> Optional[str]:
@@ -443,6 +471,146 @@ def parse_vtt(path: Path) -> List[CaptionCue]:
         previous_line = text
         cues.append(CaptionCue(start=parse_ts(cue.start), end=parse_ts(cue.end), text=text))
     return cues
+
+
+def caption_coverage_ratio(cues: List[CaptionCue], source_duration: Optional[float]) -> float:
+    if not cues or not source_duration or source_duration <= 0:
+        return 0.0
+    covered = 0.0
+    for cue in cues:
+        covered += max(0.0, float(cue.end) - float(cue.start))
+    return min(1.0, covered / max(1.0, float(source_duration)))
+
+
+def captions_look_weak(cues: List[CaptionCue], source_duration: Optional[float]) -> bool:
+    if not cues:
+        return True
+    cleaned = [clean_caption_text(cue.text) for cue in cues]
+    meaningful = [text for text in cleaned if text]
+    if len(meaningful) < 8:
+        return True
+    coverage = caption_coverage_ratio(cues, source_duration)
+    if source_duration and source_duration >= 240 and coverage < 0.12:
+        return True
+    avg_words = sum(len(_tokenize_caption_words(text)) for text in meaningful) / max(1, len(meaningful))
+    if avg_words < 2.2:
+        return True
+    unique_ratio = len({text.lower() for text in meaningful}) / max(1, len(meaningful))
+    if unique_ratio < 0.45:
+        return True
+    return False
+
+
+def _get_whisper_model():
+    global _WHISPER_MODEL_CACHE
+    if _WHISPER_MODEL_CACHE is not None:
+        return _WHISPER_MODEL_CACHE
+    from faster_whisper import WhisperModel  # type: ignore
+
+    _WHISPER_MODEL_CACHE = WhisperModel(WHISPER_MODEL_SIZE, device="cpu", compute_type=WHISPER_COMPUTE_TYPE)
+    return _WHISPER_MODEL_CACHE
+
+
+def transcribe_with_faster_whisper(
+    ffmpeg_bin: str,
+    source_video: Path,
+    *,
+    language: str = "es",
+    max_seconds: Optional[int] = None,
+) -> List[CaptionCue]:
+    if not TRANSCRIBE_WITH_FASTER_WHISPER:
+        return []
+
+    capped_seconds = None
+    if max_seconds is not None:
+        capped_seconds = max(30, min(int(max_seconds), WHISPER_MAX_SECONDS))
+
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_audio:
+        tmp_path = Path(tmp_audio.name)
+
+    cmd = [
+        ffmpeg_bin,
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        str(source_video),
+    ]
+    if capped_seconds is not None:
+        cmd.extend(["-t", str(capped_seconds)])
+    cmd.extend(["-vn", "-ac", "1", "-ar", "16000", str(tmp_path)])
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        tmp_path.unlink(missing_ok=True)
+        raise RuntimeError(f"No se pudo extraer audio para Whisper: {(proc.stderr or '')[-800:]}")
+
+    try:
+        model = _get_whisper_model()
+        segments, _info = model.transcribe(
+            str(tmp_path),
+            language=(language or "es"),
+            vad_filter=True,
+            beam_size=1,
+            word_timestamps=False,
+        )
+        cues: List[CaptionCue] = []
+        for seg in segments:
+            text = normalize_text(getattr(seg, "text", "") or "")
+            if not text:
+                continue
+            cues.append(
+                CaptionCue(
+                    start=float(getattr(seg, "start", 0.0) or 0.0),
+                    end=float(getattr(seg, "end", 0.0) or 0.0),
+                    text=text,
+                )
+            )
+        return cues
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+def load_best_caption_cues(
+    ffmpeg_bin: str,
+    source_video: Path,
+    subtitle_file: Optional[Path],
+    *,
+    language: str,
+    source_duration: Optional[float],
+    log_fn=log,
+) -> tuple[List[CaptionCue], str]:
+    parsed_cues: List[CaptionCue] = []
+    if subtitle_file and subtitle_file.exists() and subtitle_file.suffix.lower() == ".vtt":
+        parsed_cues = parse_vtt(subtitle_file)
+        log_fn(f"Subtitulos encontrados: {subtitle_file.name}")
+    else:
+        log_fn("No hay subtitulos VTT disponibles.")
+
+    should_transcribe = (
+        TRANSCRIBE_WITH_FASTER_WHISPER
+        and (
+            not parsed_cues
+            or (TRANSCRIBE_IF_CAPTIONS_WEAK and captions_look_weak(parsed_cues, source_duration))
+        )
+    )
+
+    if should_transcribe:
+        try:
+            max_seconds = int(source_duration) if source_duration else WHISPER_MAX_SECONDS
+            log_fn("Generando transcripcion propia con Whisper por calidad de captions.")
+            whisper_cues = transcribe_with_faster_whisper(
+                ffmpeg_bin,
+                source_video,
+                language=language,
+                max_seconds=max_seconds,
+            )
+            if whisper_cues:
+                return whisper_cues, "faster_whisper"
+        except Exception as exc:
+            log_fn(f"Whisper no estuvo disponible o fallo; sigo con captions existentes. ({exc})")
+
+    return parsed_cues, "youtube_vtt" if parsed_cues else "none"
 
 
 def pick_hook(cues: Iterable[CaptionCue]) -> str:
@@ -1392,6 +1560,102 @@ def download_source_video(candidate: VideoCandidate, job_dir: Path, language: st
     return video_file, sub_file, info
 
 
+def _get_face_cascade():
+    global _FACE_CASCADE_CACHE
+    if _FACE_CASCADE_CACHE is not None:
+        return _FACE_CASCADE_CACHE
+    import cv2  # type: ignore
+
+    cascade_path = Path(cv2.data.haarcascades) / "haarcascade_frontalface_default.xml"
+    cascade = cv2.CascadeClassifier(str(cascade_path))
+    _FACE_CASCADE_CACHE = cascade if not cascade.empty() else None
+    return _FACE_CASCADE_CACHE
+
+
+def _frame_energy_focus_x(frame) -> Optional[float]:
+    try:
+        import cv2  # type: ignore
+        import numpy as np  # type: ignore
+    except Exception:
+        return None
+    if frame is None or getattr(frame, "size", 0) == 0:
+        return None
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray, 60, 160)
+    energy = edges.sum(axis=0).astype("float64")
+    if energy.sum() <= 0:
+        return None
+    xs = np.arange(len(energy), dtype="float64")
+    center = float((xs * energy).sum() / energy.sum())
+    width = max(1.0, float(frame.shape[1]))
+    return min(0.85, max(0.15, center / width))
+
+
+def detect_subject_focus_x(
+    source_video: Path,
+    *,
+    start: float,
+    end: float,
+) -> Optional[float]:
+    if not SMART_FOCUS_ENABLED:
+        return None
+    try:
+        import cv2  # type: ignore
+    except Exception:
+        return None
+
+    cap = cv2.VideoCapture(str(source_video))
+    if not cap.isOpened():
+        return None
+
+    cascade = _get_face_cascade()
+    sample_start = max(0.0, float(start))
+    sample_end = max(sample_start + 1.0, float(end))
+    focus_samples: List[float] = []
+    t = sample_start + 0.2
+    while t < sample_end and len(focus_samples) < 10:
+        cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000.0)
+        ok, frame = cap.read()
+        if ok and frame is not None:
+            used_focus = None
+            if cascade is not None:
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                faces = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(60, 60))
+                if len(faces):
+                    x, _y, w, _h = max(faces, key=lambda row: row[2] * row[3])
+                    used_focus = min(0.85, max(0.15, float(x + (w / 2.0)) / max(1.0, float(frame.shape[1]))))
+            if used_focus is None:
+                used_focus = _frame_energy_focus_x(frame)
+            if used_focus is not None:
+                focus_samples.append(used_focus)
+        t += SMART_FOCUS_SAMPLE_STEP
+
+    cap.release()
+    if not focus_samples:
+        return None
+    focus_samples.sort()
+    return focus_samples[len(focus_samples) // 2]
+
+
+def _foreground_compose_filter(output_width: int, output_height: int, focus_x: float | None = None) -> str:
+    ratio = output_width / output_height
+    if focus_x is None:
+        return (
+            f"[0:v]scale={output_width}:{output_height}:force_original_aspect_ratio=decrease,"
+            "setsar=1[fg]"
+        )
+    safe_focus = min(0.82, max(0.18, float(focus_x)))
+    ratio_str = f"{ratio:.6f}"
+    return (
+        "[0:v]crop="
+        f"w='if(gte(iw/ih,{ratio_str}),ih*{ratio_str},iw)':"
+        f"h='if(gte(iw/ih,{ratio_str}),ih,iw/{ratio_str})':"
+        f"x='if(gte(iw/ih,{ratio_str}),min(max(iw*{safe_focus:.4f}-(ih*{ratio_str})/2,0),iw-(ih*{ratio_str})),0)':"
+        f"y='if(gte(iw/ih,{ratio_str}),0,(ih-(iw/{ratio_str}))/2)',"
+        f"scale={output_width}:{output_height},setsar=1[fg]"
+    )
+
+
 def render_short(
     ffmpeg_bin: str,
     input_video: Path,
@@ -1401,6 +1665,7 @@ def render_short(
     subtitle_ass: Path | None = None,
     include_hook_overlay: bool = False,
     fast_render: bool = False,
+    focus_x: float | None = None,
 ) -> None:
     branded_outro = locate_brand_outro()
     main_output = output_video.with_name(f"{output_video.stem}.main{output_video.suffix}")
@@ -1421,9 +1686,8 @@ def render_short(
         fast_comp = (
             "[0:v]scale=720:1280:force_original_aspect_ratio=increase,"
             "crop=720:1280,boxblur=12:6[bg];"
-            "[0:v]scale=720:1280:force_original_aspect_ratio=decrease,"
-            "setsar=1[fg];"
-            "[bg][fg]overlay=(W-w)/2:(H-h)/2[vpre]"
+            + _foreground_compose_filter(720, 1280, focus_x)
+            + ";[bg][fg]overlay=(W-w)/2:(H-h)/2[vpre]"
         )
         fast_chains = [fast_comp, fast_intro]
         fast_label = "[vzoom]"
@@ -1504,9 +1768,8 @@ def render_short(
     base_comp = (
         "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,"
         "crop=1080:1920,boxblur=22:12[bg];"
-        "[0:v]scale=1080:1920:force_original_aspect_ratio=decrease,"
-        "setsar=1,eq=contrast=1.05:saturation=1.10[fg];"
-        "[bg][fg]overlay=(W-w)/2:(H-h)/2[vpre]"
+        + _foreground_compose_filter(1080, 1920, focus_x).replace(",setsar=1[fg]", ",setsar=1,eq=contrast=1.05:saturation=1.10[fg]")
+        + ";[bg][fg]overlay=(W-w)/2:(H-h)/2[vpre]"
     )
     chains = [base_comp]
     chains.append(intro_transition)
@@ -1594,8 +1857,8 @@ def render_short(
     fallback_comp = (
         "[0:v]scale=720:1280:force_original_aspect_ratio=increase,"
         "crop=720:1280,boxblur=18:10[bg];"
-        "[0:v]scale=720:1280:force_original_aspect_ratio=decrease,setsar=1[fg];"
-        "[bg][fg]overlay=(W-w)/2:(H-h)/2[vpre]"
+        + _foreground_compose_filter(720, 1280, focus_x)
+        + ";[bg][fg]overlay=(W-w)/2:(H-h)/2[vpre]"
     )
     fallback_chains = [fallback_comp]
     fallback_chains.append(fallback_intro)
@@ -1761,12 +2024,16 @@ def run(args: argparse.Namespace) -> int:
     log(f"Descargando fuente: {selected.url}")
     source_video, subtitle_file, info = download_source_video(selected, job_dir=job_dir, language=args.language)
 
-    cues: List[CaptionCue] = []
-    if subtitle_file and subtitle_file.exists() and subtitle_file.suffix.lower() == ".vtt":
-        log(f"Subtitulos detectados: {subtitle_file.name}")
-        cues = parse_vtt(subtitle_file)
-    else:
-        log("No hay subtitulos VTT disponibles; se renderiza sin subtitulos.")
+    cues, cue_source = load_best_caption_cues(
+        ffmpeg_bin,
+        source_video,
+        subtitle_file,
+        language=args.language,
+        source_duration=float(source_duration or 0.0) if source_duration else None,
+        log_fn=log,
+    )
+    if cue_source == "none":
+        log("No hubo captions utilizables; se renderiza sin subtitulos.")
 
     source_duration = info.get("duration") or selected.duration
     segment = choose_segment(cues, source_duration=source_duration, target_duration=args.duration)
@@ -1775,12 +2042,14 @@ def run(args: argparse.Namespace) -> int:
     output_file = output_dir / f"{file_slug}_tiktok.mp4"
     hook_text = segment.hook
     log(f"Renderizando short ({segment.start:.1f}s -> {segment.end:.1f}s)...")
+    focus_x = detect_subject_focus_x(source_video, start=segment.start, end=segment.end)
     render_short(
         ffmpeg_bin=ffmpeg_bin,
         input_video=source_video,
         output_video=job_dir / output_file.name,
         segment=segment,
         hook_text=hook_text,
+        focus_x=focus_x,
     )
 
     (job_dir / output_file.name).replace(output_file)

@@ -45,6 +45,7 @@ from clip_dashboard import (  # noqa: E402
     discover_creator_videos,
     generate_dashboard,
     recent_used_video_keys,
+    record_performance_signal,
     record_used_video,
 )
 from tiktok_direct_post_api import (  # noqa: E402
@@ -291,6 +292,7 @@ class CreateJobRequest(BaseModel):
     overlap_ratio: float = Field(default=0.40, ge=0.10, le=0.80)
     language: str = Field(default="es", min_length=2, max_length=8)
     fast_render: bool = False
+    slot_key: str | None = Field(default=None, min_length=0, max_length=32)
 
 
 class ShareTelegramRequest(BaseModel):
@@ -1969,6 +1971,7 @@ def _run_daily_review_batch(batch_id: str, req: DailyReviewBatchRequest) -> None
                             "overlap_ratio": req.overlap_ratio,
                             "language": req.language,
                             "fast_render": True,
+                            "slot_key": slot_key,
                         },
                         "result": None,
                         "error": None,
@@ -1982,6 +1985,7 @@ def _run_daily_review_batch(batch_id: str, req: DailyReviewBatchRequest) -> None
                     overlap_ratio=req.overlap_ratio,
                     language=req.language,
                     fast_render=True,
+                    slot_key=slot_key,
                 )
                 _run_job(job_id, create_req)
                 with _jobs_lock:
@@ -2033,6 +2037,10 @@ def _run_daily_review_batch(batch_id: str, req: DailyReviewBatchRequest) -> None
                         "review_group_label": f"{item.get('slot_label')} {item.get('publish_time')}".strip(),
                         "queued_for_next_batch": False,
                         "carryover_key": None,
+                        "source_title": source_title,
+                        "source_url": source_url,
+                        "source_channel": str(item.get("source_channel") or result.get("source_channel") or "").strip(),
+                        "slot_key": slot_key,
                     }
                     with _publish_lock:
                         _publish_requests[request_id] = publish_payload
@@ -2150,6 +2158,24 @@ def _notify_publish_result(request_id: str, text: str) -> None:
         pass
 
 
+def _record_publish_request_signal(req: dict[str, Any], signal: str, *, metadata: dict[str, Any] | None = None) -> None:
+    option = req.get("option") or {}
+    record_performance_signal(
+        source_url=str(req.get("source_url") or "").strip(),
+        source_title=str(req.get("source_title") or "").strip(),
+        source_channel=str(req.get("source_channel") or "").strip(),
+        video_id=str(option.get("video_id") or "").strip(),
+        slot_key=str(req.get("slot_key") or "").strip(),
+        signal=signal,
+        metadata={
+            "request_id": str(req.get("request_id") or "").strip(),
+            "job_id": str(req.get("job_id") or "").strip(),
+            "option_id": int(option.get("option_id") or req.get("option_id") or 0),
+            **dict(metadata or {}),
+        },
+    )
+
+
 def _run_tiktok_publish(request_id: str) -> None:
     with _publish_lock:
         req = _publish_requests.get(request_id)
@@ -2229,6 +2255,24 @@ def _run_tiktok_publish(request_id: str) -> None:
                 publish_id=None,
                 creator_username=creator_username,
             )
+            if publish_state == "completed":
+                _record_publish_request_signal(
+                    req,
+                    "published_tiktok",
+                    metadata={"browser_status": browser_status},
+                )
+            elif publish_state == "pending_manual_review":
+                _record_publish_request_signal(
+                    req,
+                    "pending_manual_review",
+                    metadata={"browser_status": browser_status},
+                )
+            else:
+                _record_publish_request_signal(
+                    req,
+                    "publish_unconfirmed",
+                    metadata={"browser_status": browser_status},
+                )
             _append_publish_log(request_id, f"Fallback navegador terminado con estado: {browser_status}.")
             if browser_result.get("stdout"):
                 _append_publish_log(request_id, f"Uploader browser: {browser_result['stdout'][-400:]}")
@@ -2258,6 +2302,18 @@ def _run_tiktok_publish(request_id: str) -> None:
             publish_id=publish_id,
             creator_username=creator_username,
         )
+        if final_status == "PUBLISH_COMPLETE":
+            _record_publish_request_signal(
+                req,
+                "published_tiktok",
+                metadata={"tiktok_status": final_status, "publish_id": publish_id},
+            )
+        else:
+            _record_publish_request_signal(
+                req,
+                "failed_tiktok",
+                metadata={"tiktok_status": final_status, "publish_id": publish_id},
+            )
         _append_publish_log(request_id, f"TikTok devolvio estado final: {final_status}.")
         _append_log(req["job_id"], f"Opcion {req['option_id']} TikTok status: {final_status}.")
         if final_status == "PUBLISH_COMPLETE":
@@ -2272,6 +2328,7 @@ def _run_tiktok_publish(request_id: str) -> None:
             )
     except Exception as exc:
         _set_publish_state(request_id, status="failed", error=str(exc))
+        _record_publish_request_signal(req, "failed_tiktok", metadata={"error": str(exc)})
         _append_publish_log(request_id, f"Error TikTok: {exc}")
         _append_log(req["job_id"], f"Opcion {req['option_id']} fallo al subir a TikTok: {exc}")
         _notify_publish_result(request_id, f"Fallo TikTok en opcion {req['option_id']}: {exc}")
@@ -2299,6 +2356,7 @@ def _process_telegram_callback(callback_query: dict[str, Any]) -> None:
         if carryover_key:
             _remove_carryover_request(carryover_key)
         _set_publish_state(request_id, status="cancelled")
+        _record_publish_request_signal(req, "telegram_cancelled")
         _append_publish_log(request_id, "Solicitud cancelada desde Telegram.")
         _append_log(req["job_id"], f"Solicitud TikTok cancelada para opcion {req['option_id']}.")
         _telegram_call("answerCallbackQuery", data={"callback_query_id": callback_id, "text": "Cancelado."}, timeout=30)
@@ -2313,6 +2371,8 @@ def _process_telegram_callback(callback_query: dict[str, Any]) -> None:
 
     if action == "next":
         added, message = _queue_request_for_next_batch(request_id, req)
+        if added:
+            _record_publish_request_signal(req, "queued_next_batch")
         _telegram_call("answerCallbackQuery", data={"callback_query_id": callback_id, "text": message[:180]}, timeout=30)
         return
     if action != "ok":
@@ -2343,6 +2403,7 @@ def _process_telegram_callback(callback_query: dict[str, Any]) -> None:
     if carryover_key:
         _remove_carryover_request(carryover_key)
     _set_publish_state(request_id, status="approved")
+    _record_publish_request_signal(req, "telegram_approved")
     _append_publish_log(request_id, "OK recibido desde Telegram.")
     _telegram_call("answerCallbackQuery", data={"callback_query_id": callback_id, "text": "Subiendo a TikTok..."}, timeout=30)
     threading.Thread(target=_run_tiktok_publish, args=(request_id,), daemon=True).start()
@@ -2397,6 +2458,7 @@ def _run_job(job_id: str, req: CreateJobRequest) -> None:
             fast_render=req.fast_render,
             output_dir=str(OUTPUT_DIR),
             work_dir=str(WORK_DIR),
+            slot_key=str(req.slot_key or "").strip(),
         )
         result = generate_dashboard(config, log_fn=lambda m: _append_log(job_id, m))
         payload = _serialize_result(result)
@@ -2780,6 +2842,10 @@ def prepare_tiktok_review(req: PrepareTikTokReviewRequest, request: Request) -> 
         "creator_username": None,
         "queued_for_next_batch": False,
         "carryover_key": None,
+        "source_title": str(result.get("source_title") or "").strip(),
+        "source_url": str(result.get("source_url") or "").strip(),
+        "source_channel": str(result.get("source_channel") or "").strip(),
+        "slot_key": str((job.get("request") or {}).get("slot_key") or result.get("slot_key") or "").strip(),
     }
     with _publish_lock:
         _publish_requests[request_id] = payload
@@ -2822,6 +2888,10 @@ def prepare_tiktok_review_from_output(req: PrepareTikTokReviewFromOutputRequest,
         "review_group_id": f"output:{safe_slug}",
         "queued_for_next_batch": False,
         "carryover_key": None,
+        "source_title": str(result.get("source_title") or "").strip(),
+        "source_url": str(result.get("source_url") or "").strip(),
+        "source_channel": str(result.get("source_channel") or "").strip(),
+        "slot_key": str(result.get("slot_key") or "").strip(),
     }
     with _publish_lock:
         _publish_requests[request_id] = payload
