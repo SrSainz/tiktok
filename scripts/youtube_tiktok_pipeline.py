@@ -146,6 +146,12 @@ SMART_FOCUS_ENABLED = os.getenv("SMART_FOCUS_ENABLED", "1").strip().lower() not 
 }
 SMART_FOCUS_SAMPLE_STEP = max(0.75, float(os.getenv("SMART_FOCUS_SAMPLE_STEP", "2.0").strip() or "2.0"))
 TIKTOK_NATIVE_FILL_ZOOM = min(1.18, max(1.0, float(os.getenv("TIKTOK_NATIVE_FILL_ZOOM", "1.06").strip() or "1.06")))
+BURNED_HOOK_ENABLED = os.getenv("BURNED_HOOK_ENABLED", "0").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 
 @dataclass
@@ -1016,7 +1022,7 @@ def write_segment_ass(cues: List[CaptionCue], start: float, end: float, out_path
     recent_clean_texts: List[str] = []
     segment_duration = max(0.1, end - start)
 
-    hook_markup = build_hook_ass_markup(hook_text)
+    hook_markup = build_hook_ass_markup(hook_text) if BURNED_HOOK_ENABLED else ""
     if hook_markup:
         hook_end = min(max(1.35, segment_duration * 0.24), 1.9, max(0.8, segment_duration - 0.2))
         events.append(
@@ -1103,8 +1109,8 @@ def write_segment_ass(cues: List[CaptionCue], start: float, end: float, out_path
             "Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,"
             "Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,"
             "MarginR,MarginV,Encoding",
-            "Style: Hook,Arial,74,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,5,0,8,88,88,248,1",
-            "Style: Cap,Arial,68,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,5,0,2,84,84,430,1",
+            "Style: Hook,Arial,72,&H00FFFFFF,&H00FFFFFF,&H00000000,&H64000000,1,0,0,0,100,100,0,0,3,0,0,8,88,88,270,1",
+            "Style: Cap,Arial,76,&H00FFFFFF,&H00FFFFFF,&H00000000,&H64000000,1,0,0,0,100,100,0,0,3,0,0,2,72,72,240,1",
             "",
             "[Events]",
             "Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text",
@@ -1698,12 +1704,7 @@ def render_short(
             "h='if(lt(t,0.45),1280*(1.04-0.04*t/0.45),1280)':"
             "eval=frame,crop=720:1280[vzoom]"
         )
-        fast_comp = (
-            "[0:v]scale=720:1280:force_original_aspect_ratio=increase,"
-            "crop=720:1280,boxblur=12:6[bg];"
-            + _foreground_compose_filter(720, 1280, focus_x)
-            + ";[bg][fg]overlay=(W-w)/2:(H-h)/2[vpre]"
-        )
+        fast_comp = _foreground_compose_filter(720, 1280, focus_x).replace("[fg]", "[vpre]")
         fast_chains = [fast_comp, fast_intro]
         fast_label = "[vzoom]"
         if subtitle_ass and subtitle_ass.exists():
@@ -1780,11 +1781,9 @@ def render_short(
         "h='if(lt(t,0.70),1920*(1.08-0.08*t/0.70),1920)':"
         "eval=frame,crop=1080:1920[vzoom]"
     )
-    base_comp = (
-        "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,"
-        "crop=1080:1920,boxblur=22:12[bg];"
-        + _foreground_compose_filter(1080, 1920, focus_x).replace(",setsar=1[fg]", ",setsar=1,eq=contrast=1.05:saturation=1.10[fg]")
-        + ";[bg][fg]overlay=(W-w)/2:(H-h)/2[vpre]"
+    base_comp = _foreground_compose_filter(1080, 1920, focus_x).replace(
+        ",setsar=1[fg]",
+        ",setsar=1,eq=contrast=1.05:saturation=1.10[vpre]",
     )
     chains = [base_comp]
     chains.append(intro_transition)
@@ -1869,12 +1868,7 @@ def render_short(
         "h='if(lt(t,0.60),1280*(1.07-0.07*t/0.60),1280)':"
         "eval=frame,crop=720:1280[vzoom]"
     )
-    fallback_comp = (
-        "[0:v]scale=720:1280:force_original_aspect_ratio=increase,"
-        "crop=720:1280,boxblur=18:10[bg];"
-        + _foreground_compose_filter(720, 1280, focus_x)
-        + ";[bg][fg]overlay=(W-w)/2:(H-h)/2[vpre]"
-    )
+    fallback_comp = _foreground_compose_filter(720, 1280, focus_x).replace("[fg]", "[vpre]")
     fallback_chains = [fallback_comp]
     fallback_chains.append(fallback_intro)
     fallback_label = "[vzoom]"
