@@ -27,6 +27,18 @@ PRIVACY_LABELS = {
     "PUBLIC_TO_EVERYONE": "Todo el mundo",
 }
 
+PUBLISH_SUCCESS_TEXT_MARKERS = [
+    "se ha publicado",
+    "publicado",
+    "published",
+    "your video has been uploaded",
+    "your post is being uploaded",
+    "tu video se esta subiendo",
+    "tu vídeo se está subiendo",
+    "upload another",
+    "subir otro",
+]
+
 
 def _normalize_text(value: str) -> str:
     normalized = unicodedata.normalize("NFKD", value or "")
@@ -128,6 +140,11 @@ def _apply_privacy_with_keyboard(page, visibility, privacy_level: str) -> bool:
             pass
         page.wait_for_timeout(250)
     return _current_privacy_text(visibility) == target
+
+
+def _detect_publish_success_from_text(raw_text: str) -> bool:
+    normalized = _normalize_text(raw_text or "")
+    return any(marker in normalized for marker in PUBLISH_SUCCESS_TEXT_MARKERS)
 
 
 def _pick_existing_upload_page(context):
@@ -363,11 +380,27 @@ def _upload_via_selenium_cdp(
             except Exception:
                 driver.execute_script("arguments[0].click();", post_btn)
             log("Intentando publicar automaticamente...")
+            publish_status = ""
             try:
-                WebDriverWait(driver, 45).until(lambda d: "upload" not in (d.current_url or ""))
-                status = "publish_navigation_detected"
+                def _published(driver_obj):
+                    nonlocal publish_status
+                    url = (driver_obj.current_url or "").lower()
+                    if "upload" not in url:
+                        publish_status = "publish_navigation_detected"
+                        return True
+                    try:
+                        body = driver_obj.find_element(By.TAG_NAME, "body").text
+                    except Exception:
+                        body = ""
+                    if _detect_publish_success_from_text(body):
+                        publish_status = "publish_confirmation_detected"
+                        return True
+                    return False
+
+                WebDriverWait(driver, 75).until(_published)
+                status = publish_status or "publish_confirmation_detected"
             except Exception:
-                status = "post_clicked"
+                status = "post_clicked_unconfirmed"
         else:
             log(f"Listo para revisar/publicar manualmente. Esperando {manual_wait}s...")
             import time
@@ -490,12 +523,36 @@ def upload(
             post_btn = page.get_by_role("button", name=re.compile(r"(Publicar|Post)", re.I)).first
             post_btn.click(timeout=20000)
             log("Intentando publicar automaticamente...")
+            publish_status = ""
             try:
-                page.wait_for_url(re.compile(r"^https://www\.tiktok\.com/(?!.*upload)"), timeout=45000)
-                status = "publish_navigation_detected"
+                def _published() -> bool:
+                    nonlocal publish_status
+                    url = (page.url or "").lower()
+                    if "upload" not in url:
+                        publish_status = "publish_navigation_detected"
+                        return True
+                    try:
+                        body_text = page.locator("body").inner_text(timeout=2000)
+                    except Exception:
+                        body_text = ""
+                    if _detect_publish_success_from_text(body_text):
+                        publish_status = "publish_confirmation_detected"
+                        return True
+                    return False
+
+                page.wait_for_function("() => true", timeout=100)  # keep playwright event loop warm
+                deadline_ms = 75000
+                interval_ms = 1000
+                elapsed = 0
+                while elapsed < deadline_ms:
+                    if _published():
+                        break
+                    page.wait_for_timeout(interval_ms)
+                    elapsed += interval_ms
+                status = publish_status or "post_clicked_unconfirmed"
             except Exception:
-                page.wait_for_timeout(15000)
-                status = "post_clicked"
+                page.wait_for_timeout(3000)
+                status = "post_clicked_unconfirmed"
         else:
             log(f"Listo para revisar/publicar manualmente. Esperando {manual_wait}s...")
             page.wait_for_timeout(manual_wait * 1000)

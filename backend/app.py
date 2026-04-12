@@ -1969,20 +1969,39 @@ def _run_tiktok_publish(request_id: str) -> None:
                 privacy_level=privacy_level,
             )
             browser_status = str((browser_result.get("result") or {}).get("status") or "browser_fallback")
+            browser_status_upper = f"BROWSER_{browser_status.upper()}"
+            confirmed_browser_statuses = {"publish_navigation_detected", "publish_confirmation_detected"}
+            if browser_status in confirmed_browser_statuses:
+                publish_state = "completed"
+            elif browser_status == "manual_review":
+                publish_state = "pending_manual_review"
+            else:
+                publish_state = "pending_browser_confirmation"
             _set_publish_state(
                 request_id,
-                status="completed",
-                tiktok_status=f"BROWSER_{browser_status.upper()}",
+                status=publish_state,
+                tiktok_status=browser_status_upper,
                 publish_id=None,
                 creator_username=creator_username,
             )
-            _append_publish_log(request_id, f"Fallback navegador completado: {browser_status}.")
+            _append_publish_log(request_id, f"Fallback navegador terminado con estado: {browser_status}.")
             if browser_result.get("stdout"):
                 _append_publish_log(request_id, f"Uploader browser: {browser_result['stdout'][-400:]}")
-            _notify_publish_result(
-                request_id,
-                f"OK TikTok web: opcion {req['option_id']} enviada por navegador en @{creator_username or 'cuenta conectada'}.",
-            )
+            if publish_state == "completed":
+                _notify_publish_result(
+                    request_id,
+                    f"OK TikTok web: opcion {req['option_id']} publicada en @{creator_username or 'cuenta conectada'}.",
+                )
+            elif publish_state == "pending_manual_review":
+                _notify_publish_result(
+                    request_id,
+                    f"Revision TikTok necesaria en opcion {req['option_id']}: se dejo lista en TikTok Studio para @{creator_username or 'cuenta conectada'}, pero no se publico automaticamente.",
+                )
+            else:
+                _notify_publish_result(
+                    request_id,
+                    f"Publicacion sin confirmar en opcion {req['option_id']}: se pulso publicar en TikTok Studio para @{creator_username or 'cuenta conectada'}, pero TikTok no confirmo aun que este visible.",
+                )
             return
         status_data = status_payload.get("data") or {}
         final_status = str(status_data.get("status") or "UNKNOWN")
