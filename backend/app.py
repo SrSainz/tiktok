@@ -1284,21 +1284,6 @@ def _send_tiktok_review_to_telegram(
         data["message_thread_id"] = TELEGRAM_MESSAGE_THREAD_ID
 
     errors: list[str] = []
-    public_url = _build_absolute_asset_url(str(option.get("manual_upload_url") or ""), request=request, base_url=base_url)
-
-    if public_url:
-        try:
-            body = _telegram_call("sendVideo", data={**data, "video": public_url}, timeout=120)
-            result_obj = body.get("result") or {}
-            return {
-                "ok": True,
-                "message_id": result_obj.get("message_id"),
-                "chat_id": TELEGRAM_CHAT_ID,
-                "method": "sendVideo:url",
-            }
-        except HTTPException as exc:
-            errors.append(str(exc.detail))
-
     try:
         with video_path.open("rb") as fh:
             body = _telegram_call(
@@ -1316,6 +1301,20 @@ def _send_tiktok_review_to_telegram(
         }
     except HTTPException as exc:
         errors.append(str(exc.detail))
+
+    public_url = _build_absolute_asset_url(str(option.get("manual_upload_url") or ""), request=request, base_url=base_url)
+    if public_url:
+        try:
+            body = _telegram_call("sendVideo", data={**data, "video": public_url}, timeout=120)
+            result_obj = body.get("result") or {}
+            return {
+                "ok": True,
+                "message_id": result_obj.get("message_id"),
+                "chat_id": TELEGRAM_CHAT_ID,
+                "method": "sendVideo:url",
+            }
+        except HTTPException as exc:
+            errors.append(str(exc.detail))
 
     with video_path.open("rb") as fh:
         body = _telegram_call(
