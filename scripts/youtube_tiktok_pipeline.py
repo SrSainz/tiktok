@@ -524,6 +524,7 @@ def transcribe_with_faster_whisper(
     *,
     language: str = "es",
     max_seconds: Optional[int] = None,
+    start_seconds: float = 0.0,
 ) -> List[CaptionCue]:
     if not TRANSCRIBE_WITH_FASTER_WHISPER:
         return []
@@ -541,9 +542,13 @@ def transcribe_with_faster_whisper(
         "-hide_banner",
         "-loglevel",
         "error",
+    ]
+    if start_seconds > 0:
+        cmd.extend(["-ss", f"{max(0.0, float(start_seconds)):.3f}"])
+    cmd.extend([
         "-i",
         str(source_video),
-    ]
+    ])
     if capped_seconds is not None:
         cmd.extend(["-t", str(capped_seconds)])
     cmd.extend(["-vn", "-ac", "1", "-ar", "16000", str(tmp_path)])
@@ -562,14 +567,15 @@ def transcribe_with_faster_whisper(
             word_timestamps=False,
         )
         cues: List[CaptionCue] = []
+        offset = max(0.0, float(start_seconds))
         for seg in segments:
             text = normalize_text(getattr(seg, "text", "") or "")
             if not text:
                 continue
             cues.append(
                 CaptionCue(
-                    start=float(getattr(seg, "start", 0.0) or 0.0),
-                    end=float(getattr(seg, "end", 0.0) or 0.0),
+                    start=offset + float(getattr(seg, "start", 0.0) or 0.0),
+                    end=offset + float(getattr(seg, "end", 0.0) or 0.0),
                     text=text,
                 )
             )
