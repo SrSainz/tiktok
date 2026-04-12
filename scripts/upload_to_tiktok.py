@@ -164,11 +164,60 @@ def _normalize_caption_for_editor(caption: str) -> str:
     return (caption or "").replace("\r\n", "\n").replace("\r", "\n").strip()
 
 
-def _body_contains_caption_sample(raw_body: str, caption_value: str) -> bool:
-    sample = _normalize_text(caption_value[:40])
-    if not sample:
+def _caption_samples(caption_value: str) -> list[str]:
+    lines = [line.strip() for line in _normalize_caption_for_editor(caption_value).splitlines() if line.strip()]
+    samples: list[str] = []
+    for line in lines[:3]:
+        normalized = _normalize_text(line)
+        if normalized:
+            samples.append(normalized[:50])
+    if samples:
+        return samples
+    fallback = _normalize_text(caption_value[:50])
+    return [fallback] if fallback else []
+
+
+def _text_contains_caption_sample(raw_text: str, caption_value: str) -> bool:
+    samples = _caption_samples(caption_value)
+    if not samples:
         return False
-    return sample in _normalize_text(raw_body or "")
+    haystack = _normalize_text(raw_text or "")
+    return all(sample in haystack for sample in samples)
+
+
+def _extract_playwright_caption_text(page, selector: str) -> str:
+    try:
+        return (
+            page.evaluate(
+                """
+                (selector) => {
+                  const el = document.querySelector(selector);
+                  if (!el) return '';
+                  return el.innerText || el.textContent || '';
+                }
+                """,
+                selector,
+            )
+            or ""
+        )
+    except Exception:
+        return ""
+
+
+def _extract_selenium_caption_text(driver, element) -> str:
+    try:
+        return str(
+            driver.execute_script(
+                "return arguments[0].innerText || arguments[0].textContent || '';",
+                element,
+            )
+            or ""
+        )
+    except Exception:
+        try:
+            return element.text or ""
+        except Exception:
+            return ""
 
 
 def _pick_existing_upload_page(context):
@@ -199,6 +248,8 @@ def _set_playwright_caption(page, raw_caption: str) -> bool:
     if not caption_value:
         return True
     selectors = [
+        ".public-DraftEditor-content[role='combobox']",
+        "[role='combobox'].public-DraftEditor-content",
         "[data-e2e='video-caption-editor'] [contenteditable='true']",
         "div[contenteditable='true']",
         "div[contenteditable='plaintext-only']",
@@ -238,21 +289,19 @@ def _set_playwright_caption(page, raw_caption: str) -> bool:
                 )
             except Exception:
                 pass
-            try:
-                body_text = page.locator("body").inner_text(timeout=2000)
-            except Exception:
-                body_text = ""
-            if _body_contains_caption_sample(body_text, caption_value):
+            editor_text = _extract_playwright_caption_text(page, selector)
+            if _text_contains_caption_sample(editor_text, caption_value):
                 return True
             try:
                 caption_box.click(timeout=5000)
                 page.keyboard.press("Control+A")
                 page.keyboard.press("Backspace")
                 page.keyboard.insert_text(caption_value)
-                body_text = page.locator("body").inner_text(timeout=2000)
+                page.wait_for_timeout(500)
             except Exception:
-                body_text = ""
-            if _body_contains_caption_sample(body_text, caption_value):
+                pass
+            editor_text = _extract_playwright_caption_text(page, selector)
+            if _text_contains_caption_sample(editor_text, caption_value):
                 return True
         except Exception:
             continue
@@ -402,6 +451,8 @@ def _upload_via_selenium_cdp(
 
     def _find_caption_box():
         selectors = [
+            ".public-DraftEditor-content[role='combobox']",
+            "[role='combobox'].public-DraftEditor-content",
             "[data-e2e='video-caption-editor'] [contenteditable='true']",
             "div[contenteditable='true']",
             "div[contenteditable='plaintext-only']",
@@ -466,11 +517,8 @@ def _upload_via_selenium_cdp(
                 strategy()
             except Exception:
                 continue
-            try:
-                body = driver.find_element(By.TAG_NAME, "body").text
-            except Exception:
-                body = ""
-            if _body_contains_caption_sample(body, caption_value):
+            editor_text = _extract_selenium_caption_text(driver, box)
+            if _text_contains_caption_sample(editor_text, caption_value):
                 return True
         return False
 
@@ -542,10 +590,11 @@ def _upload_via_selenium_cdp(
         wait.until(lambda d: "upload" in (d.current_url or "") or len(d.find_elements(By.CSS_SELECTOR, "[data-e2e='video_visibility_container']")) > 0)
 
         if caption:
-            if _set_caption_safely(caption[:2200]):
-                log(f"Caption aplicado ({len(caption[:2200])} chars).")
+            caption_value = caption[:2200]
+            if _set_caption_safely(caption_value):
+                log(f"Caption aplicado ({len(caption_value)} chars).")
             else:
-                log("No se pudo autocompletar caption; revisa manualmente.")
+                raise RuntimeError("CAPTION_APPLY_FAILED")
 
         if privacy_level:
             try:
@@ -731,10 +780,11 @@ def upload(
         page.wait_for_timeout(1500)
 
         if caption:
-            if _set_playwright_caption(page, caption[:2200]):
-                log(f"Caption aplicado ({len(caption[:2200])} chars).")
+            caption_value = caption[:2200]
+            if _set_playwright_caption(page, caption_value):
+                log(f"Caption aplicado ({len(caption_value)} chars).")
             else:
-                log("No se pudo autocompletar caption; revisa manualmente.")
+                raise RuntimeError("CAPTION_APPLY_FAILED")
 
         if privacy_level:
             try:
