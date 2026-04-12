@@ -147,6 +147,19 @@ def _detect_publish_success_from_text(raw_text: str) -> bool:
     return any(marker in normalized for marker in PUBLISH_SUCCESS_TEXT_MARKERS)
 
 
+def _is_effectively_disabled(*values: str | None) -> bool:
+    disabled_markers = {"true", "disabled", "1", "yes"}
+    for value in values:
+        text = _normalize_text(str(value or ""))
+        if not text:
+            continue
+        if text in disabled_markers:
+            return True
+        if "disabled" in text:
+            return True
+    return False
+
+
 def _pick_existing_upload_page(context):
     candidates = []
     for page in context.pages:
@@ -241,6 +254,7 @@ def _upload_via_selenium_cdp(
     try:
         from selenium import webdriver
         from selenium.webdriver.chrome.options import Options
+        from selenium.webdriver.common.action_chains import ActionChains
         from selenium.webdriver.common.by import By
         from selenium.webdriver.support.ui import WebDriverWait
         from selenium.webdriver.support import expected_conditions as EC
@@ -251,6 +265,65 @@ def _upload_via_selenium_cdp(
     options = Options()
     options.debugger_address = debugger_address
     driver = webdriver.Chrome(options=options)
+
+    def _find_publish_button():
+        selectors = [
+            "//button[contains(., 'Publicar') or contains(., 'Post')]",
+            "//*[@role='button' and (contains(., 'Publicar') or contains(., 'Post'))]",
+        ]
+        for xpath in selectors:
+            for element in driver.find_elements(By.XPATH, xpath):
+                try:
+                    if not element.is_displayed():
+                        continue
+                except Exception:
+                    continue
+                return element
+        return None
+
+    def _publish_button_is_ready():
+        button = _find_publish_button()
+        if button is None:
+            return False
+        try:
+            disabled = _is_effectively_disabled(
+                button.get_attribute("disabled"),
+                button.get_attribute("aria-disabled"),
+                button.get_attribute("class"),
+                button.get_dom_attribute("disabled"),
+            )
+            return not disabled
+        except Exception:
+            return True
+
+    def _click_publish_button(button) -> bool:
+        strategies = []
+        try:
+            driver.execute_script("arguments[0].scrollIntoView({block: 'center', inline: 'center'});", button)
+        except Exception:
+            pass
+        strategies.append(lambda: button.click())
+        strategies.append(lambda: ActionChains(driver).move_to_element(button).pause(0.1).click(button).perform())
+        strategies.append(lambda: driver.execute_script("arguments[0].click();", button))
+        strategies.append(
+            lambda: driver.execute_script(
+                """
+                const el = arguments[0];
+                ['pointerdown','mousedown','pointerup','mouseup','click'].forEach((name) => {
+                  el.dispatchEvent(new MouseEvent(name, {bubbles: true, cancelable: true, view: window}));
+                });
+                """,
+                button,
+            )
+        )
+        for strategy in strategies:
+            try:
+                strategy()
+                return True
+            except Exception:
+                continue
+        return False
+
     try:
         log(f"Conectado a navegador existente por Selenium/CDP: {debugger_address}")
         upload_url = "https://www.tiktok.com/tiktokstudio/upload?lang=es"
@@ -372,35 +445,58 @@ def _upload_via_selenium_cdp(
                 log("No se pudo ajustar la privacidad automaticamente; se mantiene el valor actual.")
 
         if auto_post:
-            post_btn = wait.until(
-                EC.element_to_be_clickable((By.XPATH, "//button[contains(., 'Publicar') or contains(., 'Post')]"))
-            )
-            try:
-                post_btn.click()
-            except Exception:
-                driver.execute_script("arguments[0].click();", post_btn)
-            log("Intentando publicar automaticamente...")
+            wait.until(lambda d: _find_publish_button() is not None)
+            wait.until(lambda d: _publish_button_is_ready())
             publish_status = ""
-            try:
-                def _published(driver_obj):
-                    nonlocal publish_status
-                    url = (driver_obj.current_url or "").lower()
-                    if "upload" not in url:
-                        publish_status = "publish_navigation_detected"
-                        return True
-                    try:
-                        body = driver_obj.find_element(By.TAG_NAME, "body").text
-                    except Exception:
-                        body = ""
-                    if _detect_publish_success_from_text(body):
-                        publish_status = "publish_confirmation_detected"
-                        return True
-                    return False
+            clicked = False
+            for attempt in range(2):
+                post_btn = _find_publish_button()
+                if post_btn is None:
+                    break
+                clicked = _click_publish_button(post_btn)
+                if not clicked:
+                    continue
+                log(f"Intentando publicar automaticamente (intento {attempt + 1})...")
+                try:
+                    def _published(driver_obj):
+                        nonlocal publish_status
+                        url = (driver_obj.current_url or "").lower()
+                        if "upload" not in url:
+                            publish_status = "publish_navigation_detected"
+                            return True
+                        try:
+                            body = driver_obj.find_element(By.TAG_NAME, "body").text
+                        except Exception:
+                            body = ""
+                        if _detect_publish_success_from_text(body):
+                            publish_status = "publish_confirmation_detected"
+                            return True
+                        button = _find_publish_button()
+                        if button is not None:
+                            try:
+                                button_text = _normalize_text(button.text)
+                            except Exception:
+                                button_text = ""
+                            if "publicando" in button_text or "posting" in button_text or "subiendo" in button_text:
+                                publish_status = "publish_in_progress"
+                        return False
 
-                WebDriverWait(driver, 75).until(_published)
-                status = publish_status or "publish_confirmation_detected"
-            except Exception:
+                    WebDriverWait(driver, 90).until(_published)
+                except Exception:
+                    pass
+                if publish_status in {"publish_navigation_detected", "publish_confirmation_detected"}:
+                    break
+                if attempt == 0:
+                    try:
+                        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                    except Exception:
+                        pass
+            if publish_status in {"publish_navigation_detected", "publish_confirmation_detected"}:
+                status = publish_status
+            elif clicked:
                 status = "post_clicked_unconfirmed"
+            else:
+                status = "publish_click_failed"
         else:
             log(f"Listo para revisar/publicar manualmente. Esperando {manual_wait}s...")
             import time
