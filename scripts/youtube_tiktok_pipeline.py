@@ -1705,15 +1705,14 @@ def render_short(
     fade_out_start = max(0.0, clip_duration - 0.16)
     if fast_render:
         fast_fade_out_start = max(0.0, clip_duration - 0.14)
-        fast_intro = (
-            "[vpre]scale="
-            "w='if(lt(t,0.45),720*(1.04-0.04*t/0.45),720)':"
-            "h='if(lt(t,0.45),1280*(1.04-0.04*t/0.45),1280)':"
-            "eval=frame,crop=720:1280[vzoom]"
+        fast_comp = (
+            "[0:v]scale=720:1280:force_original_aspect_ratio=increase,"
+            "crop=720:1280,boxblur=12:6[bg];"
+            + _foreground_compose_filter(720, 1280, None)
+            + ";[bg][fg]overlay=(W-w)/2:(H-h)/2[vpre]"
         )
-        fast_comp = _adaptive_compose_filter(720, 1280, focus_x)
-        fast_chains = [fast_comp, fast_intro]
-        fast_label = "[vzoom]"
+        fast_chains = [fast_comp]
+        fast_label = "[vpre]"
         if subtitle_ass and subtitle_ass.exists():
             fast_chains.append(f"{fast_label}ass='{ass_filter_path(subtitle_ass)}'[vsub]")
             fast_label = "[vsub]"
@@ -1782,16 +1781,17 @@ def render_short(
         finalize_clip_with_outro(ffmpeg_bin, main_output, output_video, branded_outro, fast_render=True)
         return
 
-    intro_transition = (
-        "[vpre]scale="
-        "w='if(lt(t,0.70),1080*(1.08-0.08*t/0.70),1080)':"
-        "h='if(lt(t,0.70),1920*(1.08-0.08*t/0.70),1920)':"
-        "eval=frame,crop=1080:1920[vzoom]"
+    base_comp = (
+        "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,"
+        "crop=1080:1920,boxblur=22:12[bg];"
+        + _foreground_compose_filter(1080, 1920, None).replace(
+            ",setsar=1[fg]",
+            ",setsar=1,eq=contrast=1.05:saturation=1.10[fg]",
+        )
+        + ";[bg][fg]overlay=(W-w)/2:(H-h)/2[vpre]"
     )
-    base_comp = _adaptive_compose_filter(1080, 1920, focus_x)
     chains = [base_comp]
-    chains.append(intro_transition)
-    current_label = "[vzoom]"
+    current_label = "[vpre]"
     if subtitle_ass and subtitle_ass.exists():
         chains.append(f"{current_label}ass='{ass_filter_path(subtitle_ass)}'[vsub]")
         current_label = "[vsub]"
@@ -1866,16 +1866,14 @@ def render_short(
 
     # Fallback for constrained hosts (Railway-like): lower resolution + lighter encode.
     fb_fade_out_start = max(0.0, clip_duration - 0.16)
-    fallback_intro = (
-        "[vpre]scale="
-        "w='if(lt(t,0.60),720*(1.07-0.07*t/0.60),720)':"
-        "h='if(lt(t,0.60),1280*(1.07-0.07*t/0.60),1280)':"
-        "eval=frame,crop=720:1280[vzoom]"
+    fallback_comp = (
+        "[0:v]scale=720:1280:force_original_aspect_ratio=increase,"
+        "crop=720:1280,boxblur=18:10[bg];"
+        + _foreground_compose_filter(720, 1280, None)
+        + ";[bg][fg]overlay=(W-w)/2:(H-h)/2[vpre]"
     )
-    fallback_comp = _adaptive_compose_filter(720, 1280, focus_x)
     fallback_chains = [fallback_comp]
-    fallback_chains.append(fallback_intro)
-    fallback_label = "[vzoom]"
+    fallback_label = "[vpre]"
     if subtitle_ass and subtitle_ass.exists():
         fallback_chains.append(f"{fallback_label}ass='{ass_filter_path(subtitle_ass)}'[vsub]")
         fallback_label = "[vsub]"

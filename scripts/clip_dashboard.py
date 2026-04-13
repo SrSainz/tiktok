@@ -1524,6 +1524,7 @@ def _daily_plan_score(candidate: VideoCandidate, slot: dict[str, str], *, used_c
 
     traits = _planner_title_traits(candidate)
     slot_key = slot.get("slot_key", "")
+    vertical = _detect_content_vertical(candidate.title, candidate.channel)
     score = float(candidate.ai_score or 0.0) * 0.62
     score += min(22.0, math.log10(float(candidate.views_per_day or 0.0) + 1.0) * 10.0)
     score += min(14.0, math.log10(float(candidate.view_count or 0.0) + 1.0) * 4.0)
@@ -1551,6 +1552,16 @@ def _daily_plan_score(candidate: VideoCandidate, slot: dict[str, str], *, used_c
             score += 8.0
         if traits["comparison"]:
             score += 4.0
+
+    # With the current non-cropped horizontal+blur render, dark talk-head clips
+    # underperform badly. Prefer travel/vlog/challenge visuals until we build a
+    # dedicated podcast/business layout.
+    if vertical in {"podcast", "business"}:
+        score -= 26.0
+    elif vertical in {"travel", "vlog", "prank", "challenge", "food"}:
+        score += 8.0
+    elif vertical in {"sports", "gaming"}:
+        score += 3.0
 
     score += _performance_bias(candidate, slot_key)
     return score
