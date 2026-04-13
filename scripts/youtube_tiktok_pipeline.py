@@ -791,10 +791,11 @@ def chunk_caption_words(text: str, cue_duration: float) -> List[str]:
     if _is_low_value_caption(words):
         return []
 
-    max_chunks_by_time = max(1, int(cue_duration / 0.35))
-    chunk_count_by_words = max(1, math.ceil(len(words) / 1.6))
-    chunk_count = min(max_chunks_by_time, chunk_count_by_words, 4, len(words))
-    words_per_chunk = min(3, max(1, math.ceil(len(words) / chunk_count)))
+    max_chunks_by_time = max(1, int(cue_duration / 0.75))
+    chunk_count_by_words = max(1, math.ceil(len(words) / 4.0))
+    chunk_count = min(max_chunks_by_time, chunk_count_by_words, 3, len(words))
+    min_words_per_chunk = 2 if len(words) > 2 else 1
+    words_per_chunk = min(6, max(min_words_per_chunk, math.ceil(len(words) / chunk_count)))
 
     chunks: List[str] = []
     for i in range(0, len(words), words_per_chunk):
@@ -804,7 +805,7 @@ def chunk_caption_words(text: str, cue_duration: float) -> List[str]:
             continue
         if _looks_broken_caption(chunk_words):
             continue
-        chunk_text = wrap_caption_lines(chunk_words, max_line_chars=11, max_lines=2).upper()
+        chunk_text = wrap_caption_lines(chunk_words, max_line_chars=16, max_lines=2)
         if chunk_text:
             chunks.append(chunk_text)
     return chunks
@@ -1110,7 +1111,7 @@ def write_segment_ass(cues: List[CaptionCue], start: float, end: float, out_path
             "Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,"
             "MarginR,MarginV,Encoding",
             "Style: Hook,Arial,72,&H00FFFFFF,&H00FFFFFF,&H00000000,&H90000000,1,0,0,0,100,100,0,0,3,0,0,8,88,88,270,1",
-            "Style: Cap,Arial Black,92,&H00FFFFFF,&H00FFFFFF,&H00000000,&HA0000000,1,0,0,0,100,100,0,0,3,0,0,2,68,68,170,1",
+            "Style: Cap,Arial,82,&H00FFFFFF,&H00FFFFFF,&H00000000,&H8A000000,1,0,0,0,100,100,0,0,3,0,0,2,88,88,132,1",
             "",
             "[Events]",
             "Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text",
@@ -1664,38 +1665,20 @@ def detect_subject_focus_x(
 
 def _foreground_compose_filter(output_width: int, output_height: int, focus_x: float | None = None) -> str:
     ratio = output_width / output_height
-    safe_focus = 0.5 if focus_x is None else min(0.82, max(0.18, float(focus_x)))
+    if focus_x is None:
+        return (
+            f"[0:v]scale={output_width}:{output_height}:force_original_aspect_ratio=decrease,"
+            "setsar=1[fg]"
+        )
+    safe_focus = min(0.82, max(0.18, float(focus_x)))
     ratio_str = f"{ratio:.6f}"
-    zoom_str = f"{TIKTOK_NATIVE_FILL_ZOOM:.4f}"
     return (
         "[0:v]crop="
-        f"w='if(gte(iw/ih,{ratio_str}),min(iw,(ih*{ratio_str})/{zoom_str}),iw)':"
-        f"h='if(gte(iw/ih,{ratio_str}),ih,min(ih,(iw/{ratio_str})/{zoom_str}))':"
-        f"x='if(gte(iw/ih,{ratio_str}),min(max(iw*{safe_focus:.4f}-min(iw,(ih*{ratio_str})/{zoom_str})/2,0),iw-min(iw,(ih*{ratio_str})/{zoom_str})),0)':"
-        f"y='if(gte(iw/ih,{ratio_str}),0,(ih-min(ih,(iw/{ratio_str})/{zoom_str}))/2)',"
+        f"w='if(gte(iw/ih,{ratio_str}),ih*{ratio_str},iw)':"
+        f"h='if(gte(iw/ih,{ratio_str}),ih,iw/{ratio_str})':"
+        f"x='if(gte(iw/ih,{ratio_str}),min(max(iw*{safe_focus:.4f}-(ih*{ratio_str})/2,0),iw-(ih*{ratio_str})),0)':"
+        f"y='if(gte(iw/ih,{ratio_str}),0,(ih-(iw/{ratio_str}))/2)',"
         f"scale={output_width}:{output_height},setsar=1[fg]"
-    )
-
-
-def _adaptive_compose_filter(output_width: int, output_height: int, focus_x: float | None = None) -> str:
-    ratio = output_width / output_height
-    safe_focus = 0.5 if focus_x is None else min(0.82, max(0.18, float(focus_x)))
-    ratio_str = f"{ratio:.6f}"
-    zoom_str = f"{TIKTOK_NATIVE_FILL_ZOOM:.4f}"
-    landscape_threshold = "1.20"
-    fg_width = int(output_width * 0.985)
-    return (
-        f"[0:v]scale={output_width}:{output_height}:force_original_aspect_ratio=increase,"
-        f"crop={output_width}:{output_height},boxblur=28:10,"
-        "eq=brightness=-0.08:saturation=0.82[bg];"
-        "[0:v]crop="
-        f"w='if(gte(iw/ih,{landscape_threshold}),iw,if(gte(iw/ih,{ratio_str}),min(iw,(ih*{ratio_str})/{zoom_str}),iw))':"
-        f"h='if(gte(iw/ih,{landscape_threshold}),ih,if(gte(iw/ih,{ratio_str}),ih,min(ih,(iw/{ratio_str})/{zoom_str})))':"
-        f"x='if(gte(iw/ih,{landscape_threshold}),0,if(gte(iw/ih,{ratio_str}),min(max(iw*{safe_focus:.4f}-min(iw,(ih*{ratio_str})/{zoom_str})/2,0),iw-min(iw,(ih*{ratio_str})/{zoom_str})),0))':"
-        f"y='if(gte(iw/ih,{landscape_threshold}),0,if(gte(iw/ih,{ratio_str}),0,(ih-min(ih,(iw/{ratio_str})/{zoom_str}))/2))',"
-        f"scale=w='if(gte(iw/ih,{landscape_threshold}),{fg_width},{output_width})':"
-        f"h='if(gte(iw/ih,{landscape_threshold}),-2,{output_height})',setsar=1[fg];"
-        "[bg][fg]overlay=x='(W-w)/2':y='(H-h)/2'[vpre]"
     )
 
 
@@ -1720,13 +1703,13 @@ def render_short(
     fade_out_start = max(0.0, clip_duration - 0.16)
     if fast_render:
         fast_fade_out_start = max(0.0, clip_duration - 0.14)
-        fast_intro = (
-            "[vpre]scale="
-            "w='if(lt(t,0.45),720*(1.04-0.04*t/0.45),720)':"
-            "h='if(lt(t,0.45),1280*(1.04-0.04*t/0.45),1280)':"
-            "eval=frame,crop=720:1280[vzoom]"
+        fast_intro = "[vpre]setsar=1[vzoom]"
+        fast_comp = (
+            "[0:v]scale=720:1280:force_original_aspect_ratio=increase,"
+            "crop=720:1280,boxblur=12:6[bg];"
+            + _foreground_compose_filter(720, 1280, focus_x)
+            + ";[bg][fg]overlay=(W-w)/2:(H-h)/2[vpre]"
         )
-        fast_comp = _adaptive_compose_filter(720, 1280, focus_x)
         fast_chains = [fast_comp, fast_intro]
         fast_label = "[vzoom]"
         if subtitle_ass and subtitle_ass.exists():
@@ -1797,13 +1780,16 @@ def render_short(
         finalize_clip_with_outro(ffmpeg_bin, main_output, output_video, branded_outro, fast_render=True)
         return
 
-    intro_transition = (
-        "[vpre]scale="
-        "w='if(lt(t,0.70),1080*(1.08-0.08*t/0.70),1080)':"
-        "h='if(lt(t,0.70),1920*(1.08-0.08*t/0.70),1920)':"
-        "eval=frame,crop=1080:1920[vzoom]"
+    intro_transition = "[vpre]setsar=1[vzoom]"
+    base_comp = (
+        "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,"
+        "crop=1080:1920,boxblur=22:12[bg];"
+        + _foreground_compose_filter(1080, 1920, focus_x).replace(
+            ",setsar=1[fg]",
+            ",setsar=1,eq=contrast=1.05:saturation=1.10[fg]",
+        )
+        + ";[bg][fg]overlay=(W-w)/2:(H-h)/2[vpre]"
     )
-    base_comp = _adaptive_compose_filter(1080, 1920, focus_x)
     chains = [base_comp]
     chains.append(intro_transition)
     current_label = "[vzoom]"
@@ -1881,13 +1867,13 @@ def render_short(
 
     # Fallback for constrained hosts (Railway-like): lower resolution + lighter encode.
     fb_fade_out_start = max(0.0, clip_duration - 0.16)
-    fallback_intro = (
-        "[vpre]scale="
-        "w='if(lt(t,0.60),720*(1.07-0.07*t/0.60),720)':"
-        "h='if(lt(t,0.60),1280*(1.07-0.07*t/0.60),1280)':"
-        "eval=frame,crop=720:1280[vzoom]"
+    fallback_intro = "[vpre]setsar=1[vzoom]"
+    fallback_comp = (
+        "[0:v]scale=720:1280:force_original_aspect_ratio=increase,"
+        "crop=720:1280,boxblur=14:7[bg];"
+        + _foreground_compose_filter(720, 1280, focus_x)
+        + ";[bg][fg]overlay=(W-w)/2:(H-h)/2[vpre]"
     )
-    fallback_comp = _adaptive_compose_filter(720, 1280, focus_x)
     fallback_chains = [fallback_comp]
     fallback_chains.append(fallback_intro)
     fallback_label = "[vzoom]"
