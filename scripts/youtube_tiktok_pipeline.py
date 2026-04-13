@@ -146,7 +146,7 @@ SMART_FOCUS_ENABLED = os.getenv("SMART_FOCUS_ENABLED", "1").strip().lower() not 
 }
 SMART_FOCUS_SAMPLE_STEP = max(0.75, float(os.getenv("SMART_FOCUS_SAMPLE_STEP", "2.0").strip() or "2.0"))
 TIKTOK_NATIVE_FILL_ZOOM = min(1.22, max(1.0, float(os.getenv("TIKTOK_NATIVE_FILL_ZOOM", "1.14").strip() or "1.14")))
-BURNED_HOOK_ENABLED = os.getenv("BURNED_HOOK_ENABLED", "0").strip().lower() in {
+BURNED_HOOK_ENABLED = os.getenv("BURNED_HOOK_ENABLED", "1").strip().lower() in {
     "1",
     "true",
     "yes",
@@ -1025,7 +1025,7 @@ def write_segment_ass(cues: List[CaptionCue], start: float, end: float, out_path
 
     hook_markup = build_hook_ass_markup(hook_text) if BURNED_HOOK_ENABLED else ""
     if hook_markup:
-        hook_end = min(max(1.35, segment_duration * 0.24), 1.9, max(0.8, segment_duration - 0.2))
+        hook_end = max(4.0, segment_duration - 0.25)
         events.append(
             "Dialogue: 0,"
             f"{fmt_ass(0.08)},{fmt_ass(hook_end)},Hook,,0,0,0,,{hook_markup}"
@@ -1664,39 +1664,23 @@ def detect_subject_focus_x(
 
 
 def _foreground_compose_filter(output_width: int, output_height: int, focus_x: float | None = None) -> str:
-    ratio = output_width / output_height
-    safe_focus = 0.5 if focus_x is None else min(0.82, max(0.18, float(focus_x)))
-    ratio_str = f"{ratio:.6f}"
-    zoom_str = f"{TIKTOK_NATIVE_FILL_ZOOM:.4f}"
     return (
-        "[0:v]crop="
-        f"w='if(gte(iw/ih,{ratio_str}),min(iw,(ih*{ratio_str})/{zoom_str}),iw)':"
-        f"h='if(gte(iw/ih,{ratio_str}),ih,min(ih,(iw/{ratio_str})/{zoom_str}))':"
-        f"x='if(gte(iw/ih,{ratio_str}),min(max(iw*{safe_focus:.4f}-min(iw,(ih*{ratio_str})/{zoom_str})/2,0),iw-min(iw,(ih*{ratio_str})/{zoom_str})),0)':"
-        f"y='if(gte(iw/ih,{ratio_str}),0,(ih-min(ih,(iw/{ratio_str})/{zoom_str}))/2)',"
-        f"scale={output_width}:{output_height},setsar=1[fg]"
+        f"[0:v]scale={output_width}:{output_height}:force_original_aspect_ratio=decrease,"
+        "setsar=1[fg]"
     )
 
 
 def _adaptive_compose_filter(output_width: int, output_height: int, focus_x: float | None = None) -> str:
-    ratio = output_width / output_height
-    safe_focus = 0.5 if focus_x is None else min(0.82, max(0.18, float(focus_x)))
-    ratio_str = f"{ratio:.6f}"
-    zoom_str = f"{TIKTOK_NATIVE_FILL_ZOOM:.4f}"
-    landscape_threshold = "1.20"
-    fg_width = int(output_width * 0.985)
+    blur = "22:12" if output_width >= 1080 else "12:6"
     return (
         f"[0:v]scale={output_width}:{output_height}:force_original_aspect_ratio=increase,"
-        f"crop={output_width}:{output_height},boxblur=28:10,"
-        "eq=brightness=-0.08:saturation=0.82[bg];"
-        "[0:v]crop="
-        f"w='if(gte(iw/ih,{landscape_threshold}),iw,if(gte(iw/ih,{ratio_str}),min(iw,(ih*{ratio_str})/{zoom_str}),iw))':"
-        f"h='if(gte(iw/ih,{landscape_threshold}),ih,if(gte(iw/ih,{ratio_str}),ih,min(ih,(iw/{ratio_str})/{zoom_str})))':"
-        f"x='if(gte(iw/ih,{landscape_threshold}),0,if(gte(iw/ih,{ratio_str}),min(max(iw*{safe_focus:.4f}-min(iw,(ih*{ratio_str})/{zoom_str})/2,0),iw-min(iw,(ih*{ratio_str})/{zoom_str})),0))':"
-        f"y='if(gte(iw/ih,{landscape_threshold}),0,if(gte(iw/ih,{ratio_str}),0,(ih-min(ih,(iw/{ratio_str})/{zoom_str}))/2))',"
-        f"scale=w='if(gte(iw/ih,{landscape_threshold}),{fg_width},{output_width})':"
-        f"h='if(gte(iw/ih,{landscape_threshold}),-2,{output_height})',setsar=1[fg];"
-        "[bg][fg]overlay=x='(W-w)/2':y='(H-h)/2'[vpre]"
+        f"crop={output_width}:{output_height},boxblur={blur}[bg];"
+        + _foreground_compose_filter(output_width, output_height, focus_x).replace(
+            ",setsar=1[fg]",
+            ",setsar=1,eq=contrast=1.03:saturation=1.05[fg]",
+        )
+        + ";"
+        "[bg][fg]overlay=x='(W-w)/2':y='min(max(110,(H-h)*0.34),H-h)'[vpre]"
     )
 
 
