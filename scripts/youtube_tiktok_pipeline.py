@@ -1935,17 +1935,42 @@ def run(args: argparse.Namespace) -> int:
         log(f"Fuente de subtitulos usada: {cue_source}")
 
     segment = choose_segment(cues, source_duration=source_duration, target_duration=args.duration)
+    render_cues = cues
+    if cue_source != "faster_whisper":
+        try:
+            refined_cues = transcribe_with_faster_whisper(
+                ffmpeg_bin,
+                source_video,
+                language=args.language,
+                max_seconds=max(20, int(math.ceil(segment.end - segment.start)) + 2),
+                start_seconds=max(0.0, segment.start - 0.15),
+            )
+            if refined_cues:
+                render_cues = refined_cues
+                log("Subtitulos refinados con Whisper para el clip final.")
+        except Exception as exc:
+            log(f"No pude refinar subtitulos con Whisper para el clip final. ({exc})")
 
     file_slug = slugify(selected.title, max_len=60)
     output_file = output_dir / f"{file_slug}_tiktok.mp4"
     hook_text = segment.hook
     log(f"Renderizando short ({segment.start:.1f}s -> {segment.end:.1f}s)...")
+    subtitle_ass = job_dir / "clip.ass"
+    if render_cues:
+        try:
+            if not write_segment_ass(render_cues, segment.start, segment.end, subtitle_ass, hook_text=hook_text):
+                subtitle_ass = None
+        except Exception:
+            subtitle_ass = None
+    else:
+        subtitle_ass = None
     render_short(
         ffmpeg_bin=ffmpeg_bin,
         input_video=source_video,
         output_video=job_dir / output_file.name,
         segment=segment,
         hook_text=hook_text,
+        subtitle_ass=subtitle_ass,
     )
 
     (job_dir / output_file.name).replace(output_file)

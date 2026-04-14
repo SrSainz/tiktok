@@ -41,6 +41,7 @@ from youtube_tiktok_pipeline import (
     render_short,
     score_text,
     slugify,
+    transcribe_with_faster_whisper,
     write_segment_ass,
 )
 
@@ -2743,7 +2744,22 @@ def generate_dashboard(config: DashboardConfig, log_fn: Callable[[str], None] = 
         subtitle_ass = job_dir / f"option_{idx:02}.ass"
         if cues:
             try:
-                if not write_segment_ass(cues, seg.start, seg.end, subtitle_ass, hook_text=overlay_hook_text):
+                render_cues = cues
+                if cue_source != "faster_whisper":
+                    try:
+                        refined_cues = transcribe_with_faster_whisper(
+                            ffmpeg_bin,
+                            source_video,
+                            language=config.language,
+                            max_seconds=max(20, int(math.ceil(seg.end - seg.start)) + 2),
+                            start_seconds=max(0.0, seg.start - 0.15),
+                        )
+                        if refined_cues:
+                            render_cues = refined_cues
+                            log_fn(f"Option {idx}: subtitulos refinados con Whisper para el clip final.")
+                    except Exception as exc:
+                        log_fn(f"Option {idx}: no pude refinar subtitulos con Whisper ({exc}).")
+                if not write_segment_ass(render_cues, seg.start, seg.end, subtitle_ass, hook_text=overlay_hook_text):
                     subtitle_ass = None
             except Exception:
                 subtitle_ass = None
