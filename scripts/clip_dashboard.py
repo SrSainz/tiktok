@@ -30,19 +30,17 @@ from youtube_tiktok_pipeline import (
     clean_caption_text,
     compute_views_per_day,
     discover_most_popular_es,
-    detect_subject_focus_x,
     download_source_video,
     enrich_candidates,
     extract_hook_focus_text,
     is_within_last_days,
     discover_from_channels,
     discover_from_search,
-    load_best_caption_cues,
+    parse_vtt,
     pick_hook,
     render_short,
     score_text,
     slugify,
-    transcribe_with_faster_whisper,
     write_segment_ass,
 )
 
@@ -75,13 +73,7 @@ USED_VIDEO_HISTORY_FILE = Path(
 USED_VIDEO_COOLDOWN_HOURS = max(1, int(os.getenv("USED_VIDEO_COOLDOWN_HOURS", "72").strip() or "72"))
 USED_CREATOR_COOLDOWN_HOURS = max(1, int(os.getenv("USED_CREATOR_COOLDOWN_HOURS", "24").strip() or "24"))
 USED_VIDEO_HISTORY_LIMIT = max(50, int(os.getenv("USED_VIDEO_HISTORY_LIMIT", "500").strip() or "500"))
-PERFORMANCE_MEMORY_FILE = Path(
-    os.getenv("PERFORMANCE_MEMORY_FILE", str(REPO_ROOT / "data" / "performance_memory.json"))
-).resolve()
-PERFORMANCE_MEMORY_LIMIT = max(100, int(os.getenv("PERFORMANCE_MEMORY_LIMIT", "1000").strip() or "1000"))
-PERFORMANCE_MEMORY_DAYS = max(3, int(os.getenv("PERFORMANCE_MEMORY_DAYS", "30").strip() or "30"))
 USED_VIDEO_HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
-PERFORMANCE_MEMORY_FILE.parent.mkdir(parents=True, exist_ok=True)
 
 DISCOVERY_MODES = {"viral_es", "creators_es"}
 
@@ -211,7 +203,6 @@ class DashboardConfig:
     fast_render: bool = False
     output_dir: str = "output"
     work_dir: str = "work"
-    slot_key: str = ""
 
 
 @dataclass
@@ -222,7 +213,6 @@ class DashboardResult:
     work_job_dir: str
     source_title: str
     source_url: str
-    slot_key: str
     options: List[ClipOption]
 
 
@@ -253,24 +243,22 @@ AI_HOOK_TERMS = {
 }
 
 TOPIC_HASHTAG_RULES = [
-    (("mi vida", "ultimamente", "ultimos dias", "ultimas semanas", "update"), ["#vlog", "#storytime", "#update"]),
+    (("mi vida", "ultimamente", "últimamente", "estos dias", "estos días", "update"), ["#vlog", "#update", "#storytime"]),
     (("minecraft", "creeper", "survival", "mod"), ["#minecraft", "#gaming", "#survival"]),
     (("roblox",), ["#roblox", "#gaming", "#juegos"]),
     (("clash", "clash royale", "brawl", "brawl stars"), ["#gaming", "#mobilegaming", "#juegos"]),
     (("fortnite",), ["#fortnite", "#gaming", "#juegos"]),
-    (("fifa", "fc 25", "fc25", "fut", "gol", "partidazo"), ["#futbol", "#gaming", "#fc25"]),
+    (("fifa", "fc 25", "fc25", "fut", "gol"), ["#futbol", "#gaming", "#fc25"]),
     (("velada", "boxeo", "combate"), ["#boxeo", "#velada", "#combate"]),
-    (("entrevista", "podcast", "charla"), ["#podcast", "#clips", "#ideas"]),
-    (("psicologia", "vender", "ventas", "marketing"), ["#ventas", "#marketing", "#negocios"]),
+    (("entrevista", "podcast", "charla"), ["#podcast", "#entrevista", "#clips"]),
     (("historia", "curiosidad", "dato"), ["#curiosidades", "#datos", "#storytime"]),
-    (("viaje", "viaj", "hong kong", "china", "india", "japon", "tokio", "corea", "qatar"), ["#viajes", "#vlog", "#curiosidades"]),
-    (("hong kong",), ["#hongkong", "#viajes", "#curiosidades"]),
-    (("india",), ["#india", "#viajes", "#vlog"]),
+    (("viaje", "viaj", "hong kong", "china", "india", "japon", "tokio", "corea"), ["#viajes", "#vlog", "#curiosidades"]),
     (("mcdonald", "comida", "restaurante", "kebab", "pizza", "burger"), ["#comida", "#vlog", "#curiosidades"]),
-    (("coche", "regale", "suenos", "regalo"), ["#regalo", "#vlog", "#momentazo"]),
+    (("coche", "regale", "regalé", "sueños", "suenos"), ["#regalo", "#vlog", "#momentazo"]),
     (("reto", "24 horas", "24h", "supervivencia"), ["#reto", "#viral", "#momentazo"]),
     (("dinero", "negocio", "empresa", "millon", "millonario"), ["#dinero", "#negocios", "#mentalidad"]),
 ]
+
 
 SIGNAL_HASHTAG_RULES = {
     "Pregunta": ["#debate", "#opinion"],
@@ -298,44 +286,6 @@ THEME_REACTION_RULES = [
     (("boxeo", "velada", "combate"), "Tiene pinta de momento para comentarlo entero con amigos."),
     (("dinero", "negocio", "empresa", "millon", "millonario"), "Aquí hay un detalle que te hace replantearte la historia."),
 ]
-
-CONTENT_VERTICAL_RULES = [
-    ("travel", ("hong kong", "china", "india", "qatar", "japon", "tokio", "corea", "viaje", "viajes", "callejera", "spa")),
-    ("food", ("comida", "restaurante", "kebab", "pizza", "burger", "mcdonald")),
-    ("podcast", ("podcast", "entrevista", "charla", "te contare", "te contar", "21 minutos", "wild project")),
-    ("business", ("psicologia", "vender", "ventas", "negocio", "empresa", "millon", "millonario", "mentalidad", "dinero")),
-    ("challenge", ("reto", "24 horas", "24h", "supervivencia", "aguanto", "desafio")),
-    ("prank", ("broma", "bromas", "calle", "regale", "regalo", "suenos")),
-    ("sports", ("partidazo", "gol", "futbol", "boxeo", "velada", "combate", "latam", "espana")),
-    ("gaming", ("minecraft", "roblox", "fortnite", "clash", "brawl", "fifa", "fc25", "mrbeast", "wipeout")),
-    ("vlog", ("mi vida", "ultimamente", "ultimos dias", "ultimas semanas", "update")),
-]
-
-VERTICAL_CAPTION_REACTIONS = {
-    "travel": "Lo mejor de estos videos es el detalle cotidiano que aqui se siente surrealista.",
-    "food": "Entre hambre y curiosidad, este tipo de clip siempre entra solo.",
-    "podcast": "La gracia de este corte es que deja una idea clara y otra para discutirla un rato.",
-    "business": "Tiene una idea util y otra bastante debatible, que es justo lo que engancha.",
-    "challenge": "Se nota rapido que la situacion se va a torcer mas de la cuenta.",
-    "prank": "La reaccion es medio caos y medio risa, que es lo que hace que funcione.",
-    "sports": "Tiene ese punto de tension que hace que quieras ver el remate hasta el final.",
-    "gaming": "Entra directo en la parte con mas pique y se entiende al vuelo aunque no hayas visto todo.",
-    "vlog": "Resume muy bien el video y tiene ese detalle que hace quedarte unos segundos mas.",
-    "generic": "Entra rapido, se entiende facil y deja algo para comentar.",
-}
-
-VERTICAL_SUMMARY_TAILS = {
-    "travel": "y hay un detalle que se te queda rondando",
-    "food": "y lo mejor es lo normal que lo cuentan",
-    "podcast": "y justo aqui esta la parte que mejor se queda",
-    "business": "y hay una idea aqui que entra rapido",
-    "challenge": "y en este tramo es donde empieza a liarse",
-    "prank": "y aqui esta la reaccion que mejor vende el momento",
-    "sports": "y en este tramo esta la parte mas comentable",
-    "gaming": "y aqui esta justo la parte que mas pica",
-    "vlog": "y este corte resume muy bien el video",
-    "generic": "y este corte es de lo mas facil de ver",
-}
 
 SOCIAL_BAD_EDGE_WORDS = {
     "a",
@@ -444,14 +394,6 @@ PLANNER_SLOTS = [
     },
 ]
 
-SLOT_COPY_RULES = {
-    "morning": "Para primera hora entra muy facil.",
-    "lunch": "Es de los que te ves entero en un minuto.",
-    "afternoon": "Tiene el punto justo para entrar a media tarde.",
-    "prime": "Este es de los que mejor aguantan hasta el final.",
-    "late": "Deja tema para comentarlo incluso al final del dia.",
-}
-
 
 def _safe_age_days(upload_date: str | None, today: date) -> int | None:
     if not upload_date:
@@ -546,24 +488,15 @@ def _looks_noisy_title(text: str) -> bool:
     return False
 
 
-def _keyword_present(haystack: str, keyword: str) -> bool:
-    token = keyword.strip().lower()
-    if not token:
-        return False
-    if " " in token:
-        return token in haystack
-    return re.search(rf"\b{re.escape(token)}\b", haystack) is not None
-
-
 def _build_topic_hashtags(*texts: str, signal_tags: List[str] | None = None) -> List[str]:
     haystack = " ".join(
-        _clean_social_text(_strip_clip_prefix(text), allow_punctuation=False).lower()
+        _clean_social_text(text, allow_punctuation=False).lower()
         for text in texts
         if text
     ).strip()
     hashtags: List[str] = []
     for keywords, tags in TOPIC_HASHTAG_RULES:
-        if any(_keyword_present(haystack, keyword) for keyword in keywords):
+        if any(keyword in haystack for keyword in keywords):
             hashtags.extend(tags)
     for tag in signal_tags or []:
         hashtags.extend(SIGNAL_HASHTAG_RULES.get(tag, []))
@@ -608,22 +541,20 @@ def _channel_hashtag(source_channel: str) -> str:
     return slug.lower()
 
 
-def _detect_content_vertical(*texts: str) -> str:
-    haystack = " ".join(
-        _clean_social_text(_strip_clip_prefix(text), allow_punctuation=False).lower()
-        for text in texts
-        if text
-    ).strip()
-    for vertical, keywords in CONTENT_VERTICAL_RULES:
-        if any(_keyword_present(haystack, keyword) for keyword in keywords):
-            return vertical
-    return "generic"
-
-
 def _build_caption_cta(signal_tags: List[str], hook: str, why_it_may_work: str) -> str:
+    hook_clean = _strip_clip_prefix(hook)
+    why_clean = _strip_clip_prefix(why_it_may_work)
     if "Pregunta" in signal_tags:
-        return "Tu aqui que habrias hecho?"
-    return ""
+        return "Yo aqui no lo tenia nada claro."
+    if "Dato" in signal_tags or re.search(r"\b\d+\b", hook_clean):
+        return "Hay un detalle que cambia todo."
+    if "Impacto" in signal_tags:
+        return "El giro llega antes de lo que parece."
+    if why_clean:
+        why_clean = _truncate_copy(why_clean, 80)
+        if why_clean:
+            return why_clean[0].upper() + why_clean[1:]
+    return "Tiene ese punto que te hace quedarte."
 
 
 def _build_caption_reaction(
@@ -634,21 +565,21 @@ def _build_caption_reaction(
     transcript_preview: str,
     signal_tags: List[str],
 ) -> str:
-    vertical = _detect_content_vertical(source_title, hook, short_description, transcript_preview)
-    base = VERTICAL_CAPTION_REACTIONS.get(vertical, VERTICAL_CAPTION_REACTIONS["generic"])
-    if vertical in {"travel", "food", "business", "podcast", "vlog"}:
-        if "Pregunta" in signal_tags and vertical in {"podcast", "business"}:
-            return "Es de esas ideas que te dejan pensando mas de la cuenta."
-        if "Dato" in signal_tags and vertical in {"travel", "food"}:
-            return "Lo mejor es el detalle que cuentan como si fuera lo mas normal del mundo."
-        return base
-    if "Impacto" in signal_tags and vertical in {"sports", "gaming", "challenge", "prank"}:
-        return "Se ve venir el momentazo y aun asi entra mejor de lo que esperas."
+    haystack = " ".join(
+        _clean_social_text(text, allow_punctuation=False).lower()
+        for text in (source_title, hook, short_description, transcript_preview)
+        if text
+    ).strip()
+    for keywords, reaction in THEME_REACTION_RULES:
+        if any(keyword in haystack for keyword in keywords):
+            return reaction
     if "Pregunta" in signal_tags:
-        return "Tu aqui seguramente tambien te pararias a opinar."
+        return "Yo aquí habría discutido esto un buen rato."
     if "Dato" in signal_tags:
         return "Lo mejor es el detalle que sueltan casi sin avisar."
-    return base
+    if "Impacto" in signal_tags:
+        return "Se nota rápido que aquí viene un momentazo."
+    return "Tiene ese punto de resumen rápido que entra fácil y deja tema."
 
 
 def _build_thematic_summary(
@@ -657,15 +588,6 @@ def _build_thematic_summary(
     source_title: str,
     short_description: str,
 ) -> str:
-    vertical = _detect_content_vertical(title, source_title, short_description)
-    source_clean = _truncate_copy(_strip_clip_prefix(source_title), 90).rstrip(" .")
-    if source_clean and not _looks_fragmentary_social_lead(source_clean):
-        if _norm_text(source_clean) != _norm_text(title):
-            return _sentence_case(source_clean)
-        if len(_social_tokens(source_clean)) >= 4:
-            tail = VERTICAL_SUMMARY_TAILS.get(vertical, VERTICAL_SUMMARY_TAILS["generic"])
-            return _truncate_copy(f"{source_clean} {tail}", 96).rstrip(" .")
-
     pieces = _extract_social_snippets(f"{title}. {short_description}. {source_title}")
     for piece in pieces:
         clean = _truncate_copy(_strip_clip_prefix(piece), 90).rstrip(" .")
@@ -690,7 +612,7 @@ def _source_channel_line(source_channel: str, title: str) -> str:
     blocked = ("records", "official", "studios", "topic", "trailers", "pictures", "music")
     if any(token in channel.lower() for token in blocked):
         return ""
-    return f"Clip de {channel}."
+    return f"Visto en {channel}."
 
 
 def _social_tokens(text: str) -> List[str]:
@@ -845,13 +767,8 @@ def _select_social_title(
     transcript_preview: str,
     signal_tags: List[str],
 ) -> str:
-    natural_source_title = _truncate_copy(_strip_clip_prefix(source_title or ""), 72).rstrip(" .")
-    if (
-        natural_source_title
-        and len(_social_tokens(natural_source_title)) >= 3
-        and not _looks_noisy_title(natural_source_title)
-        and _content_token_count(_social_tokens(natural_source_title)) >= 2
-    ):
+    natural_source_title = _truncate_copy(_strip_clip_prefix(source_title or ""), 72)
+    if natural_source_title and len(_social_tokens(natural_source_title)) >= 2:
         return natural_source_title
 
     focus_title = _strip_clip_prefix(extract_hook_focus_text(f"{short_description}. {transcript_preview}. {hook}"))
@@ -861,7 +778,7 @@ def _select_social_title(
 
     scored: List[tuple[float, str]] = []
     for candidate in _dedupe_keep_order(raw_candidates):
-        clean = _truncate_copy(_strip_clip_prefix(candidate), 72).rstrip(" .")
+        clean = _truncate_copy(_strip_clip_prefix(candidate), 72)
         if not clean:
             continue
         scored.append(
@@ -875,10 +792,10 @@ def _select_social_title(
     if scored and scored[0][0] > -50:
         return scored[0][1]
 
-    fallback = _truncate_copy(_strip_clip_prefix(short_description or source_title or hook or "Clip viral del dia"), 72).rstrip(" .")
+    fallback = _truncate_copy(_strip_clip_prefix(short_description or source_title or hook or "Clip viral del dia"), 72)
     if fallback and not _looks_fragmentary_social_lead(fallback):
         return fallback
-    return _truncate_copy(_strip_clip_prefix(source_title or "Clip viral del dia"), 72).rstrip(" .")
+    return _truncate_copy(_strip_clip_prefix(source_title or "Clip viral del dia"), 72)
 
 
 def build_tiktok_copy(
@@ -890,7 +807,6 @@ def build_tiktok_copy(
     why_it_may_work: str,
     transcript_preview: str,
     signal_tags: List[str],
-    slot_key: str = "",
 ) -> tuple[str, str, List[str]]:
     title = _select_social_title(
         source_title=source_title,
@@ -900,17 +816,15 @@ def build_tiktok_copy(
         transcript_preview=transcript_preview,
         signal_tags=signal_tags,
     )
-    title = _sentence_case(_truncate_copy(title, 72)).rstrip(" .")
+    title = _sentence_case(title).rstrip(" .")
+    if title and title[-1] not in "!?" and (len(title.split()) > 3 or len(title) > 28):
+        title = f"{title}..."
 
-    source_title_clean = _truncate_copy(_strip_clip_prefix(source_title or ""), 72).rstrip(" .")
-    summary_line = ""
-    if len(_social_tokens(title)) < 4 or len(title) < 18:
-        summary_line = _build_thematic_summary(
-            title=title,
-            source_title=source_title,
-            short_description=short_description,
-        )
-
+    summary_line = _build_thematic_summary(
+        title=title,
+        source_title=source_title,
+        short_description=short_description,
+    )
     reaction_line = _build_caption_reaction(
         source_title=source_title,
         hook=hook,
@@ -918,31 +832,24 @@ def build_tiktok_copy(
         transcript_preview=transcript_preview,
         signal_tags=signal_tags,
     )
-    cta_line = _build_caption_cta(signal_tags, hook, why_it_may_work)
-    slot_line = SLOT_COPY_RULES.get(str(slot_key or "").strip().lower(), "")
-
     caption_parts: List[str] = []
-    if summary_line and _norm_text(summary_line) not in _norm_text(title):
+    if summary_line:
         caption_parts.append(summary_line)
     if reaction_line and _norm_text(reaction_line) not in _norm_text(" ".join(caption_parts)):
         caption_parts.append(reaction_line)
-    if cta_line and _norm_text(cta_line) not in _norm_text(" ".join(caption_parts)):
-        caption_parts.append(cta_line)
-    if slot_line and _norm_text(slot_line) not in _norm_text(" ".join(caption_parts)):
-        caption_parts.append(slot_line)
     source_line = _source_channel_line(source_channel, title)
     if source_line and _norm_text(source_line) not in _norm_text(" ".join(caption_parts)):
         caption_parts.append(source_line)
-
     caption = ""
-    for part in (part.strip() for part in caption_parts if part):
+    for idx, part in enumerate(part.strip() for part in caption_parts if part):
         if not caption:
             caption = part
             continue
-        separator = " " if caption[-1] in ".!?" else ". "
+        separator = " "
+        if caption[-1] not in ".!?":
+            separator = ". "
         caption = f"{caption}{separator}{part}"
     caption = _truncate_copy(caption, 170)
-
     hashtags = _build_topic_hashtags(
         source_title,
         source_channel,
@@ -955,10 +862,6 @@ def build_tiktok_copy(
     channel_hashtag = _channel_hashtag(source_channel)
     if channel_hashtag and channel_hashtag not in hashtags:
         hashtags = [channel_hashtag, *hashtags]
-    preferred_specific_tags = ["#hongkong", "#india", "#qatar", "#podcast", "#ventas", "#marketing", "#bromas", "#calle"]
-    for preferred in reversed(preferred_specific_tags):
-        if preferred in hashtags:
-            hashtags = [preferred if tag == preferred else tag for tag in [preferred, *[item for item in hashtags if item != preferred]]]
     hashtags = _dedupe_keep_order(hashtags)[:4]
     return title, caption, hashtags
 
@@ -1157,133 +1060,6 @@ def backfill_recent_used_videos_from_output(output_root: Path | None = None) -> 
     if added:
         _save_used_video_history(history)
     return added
-
-
-def _load_performance_memory() -> list[dict[str, Any]]:
-    cutoff_ts = (datetime.utcnow() - timedelta(days=PERFORMANCE_MEMORY_DAYS)).timestamp()
-    entries: list[dict[str, Any]] = []
-    try:
-        if PERFORMANCE_MEMORY_FILE.exists():
-            payload = json.loads(PERFORMANCE_MEMORY_FILE.read_text(encoding="utf-8"))
-            if isinstance(payload, list):
-                for item in payload:
-                    if not isinstance(item, dict):
-                        continue
-                    timestamp_raw = str(item.get("timestamp") or "").strip()
-                    signal = str(item.get("signal") or "").strip()
-                    if not timestamp_raw or not signal:
-                        continue
-                    try:
-                        ts = datetime.fromisoformat(timestamp_raw.replace("Z", "+00:00"))
-                    except Exception:
-                        continue
-                    if ts.timestamp() < cutoff_ts:
-                        continue
-                    entries.append(
-                        {
-                            "timestamp": ts.isoformat(),
-                            "signal": signal,
-                            "weight": float(item.get("weight") or 0.0),
-                            "slot_key": str(item.get("slot_key") or "").strip().lower(),
-                            "video_key": str(item.get("video_key") or "").strip(),
-                            "channel_key": str(item.get("channel_key") or "").strip().lower(),
-                            "source_url": str(item.get("source_url") or "").strip(),
-                            "source_title": str(item.get("source_title") or "").strip(),
-                            "source_channel": str(item.get("source_channel") or "").strip(),
-                            "metadata": item.get("metadata") if isinstance(item.get("metadata"), dict) else {},
-                        }
-                    )
-    except Exception:
-        return []
-    entries.sort(key=lambda item: item.get("timestamp") or "", reverse=True)
-    return entries[:PERFORMANCE_MEMORY_LIMIT]
-
-
-def _save_performance_memory(entries: list[dict[str, Any]]) -> None:
-    trimmed = sorted(entries, key=lambda item: item.get("timestamp") or "", reverse=True)[:PERFORMANCE_MEMORY_LIMIT]
-    PERFORMANCE_MEMORY_FILE.write_text(json.dumps(trimmed, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-PERFORMANCE_SIGNAL_WEIGHTS = {
-    "telegram_approved": 4.0,
-    "telegram_cancelled": -4.0,
-    "queued_next_batch": 1.5,
-    "published_tiktok": 8.0,
-    "pending_manual_review": 2.0,
-    "publish_unconfirmed": 1.0,
-    "failed_tiktok": -3.5,
-}
-
-
-def record_performance_signal(
-    *,
-    source_url: str = "",
-    source_title: str = "",
-    source_channel: str = "",
-    video_id: str = "",
-    slot_key: str = "",
-    signal: str,
-    weight: float | None = None,
-    metadata: dict[str, Any] | None = None,
-) -> None:
-    signal_name = str(signal or "").strip()
-    if not signal_name:
-        return
-    channel_key = (source_channel or "").strip().lower()
-    video_key = _candidate_video_key(source_url=source_url, video_id=video_id)
-    if not video_key and not channel_key:
-        return
-
-    entries = _load_performance_memory()
-    entries.insert(
-        0,
-        {
-            "timestamp": datetime.utcnow().isoformat(),
-            "signal": signal_name,
-            "weight": float(PERFORMANCE_SIGNAL_WEIGHTS.get(signal_name, 0.0) if weight is None else weight),
-            "slot_key": str(slot_key or "").strip().lower(),
-            "video_key": video_key,
-            "channel_key": channel_key,
-            "source_url": str(source_url or "").strip(),
-            "source_title": str(source_title or "").strip(),
-            "source_channel": str(source_channel or "").strip(),
-            "metadata": dict(metadata or {}),
-        },
-    )
-    _save_performance_memory(entries)
-
-
-def _performance_bias(candidate: VideoCandidate, slot_key: str) -> float:
-    entries = _load_performance_memory()
-    if not entries:
-        return 0.0
-
-    candidate_video_key = _candidate_video_key(candidate)
-    candidate_channel_key = _channel_key(candidate)
-    normalized_slot_key = str(slot_key or "").strip().lower()
-    now_utc = datetime.utcnow()
-    bias = 0.0
-
-    for item in entries:
-        weight = float(item.get("weight") or 0.0)
-        if abs(weight) < 0.01:
-            continue
-        timestamp_raw = str(item.get("timestamp") or "").strip()
-        try:
-            ts = datetime.fromisoformat(timestamp_raw.replace("Z", "+00:00")).replace(tzinfo=None)
-        except Exception:
-            ts = now_utc
-        age_days = max(0.0, (now_utc - ts).total_seconds() / 86400.0)
-        decay = max(0.15, 1.0 - (age_days / max(1.0, float(PERFORMANCE_MEMORY_DAYS))))
-        same_slot = normalized_slot_key and str(item.get("slot_key") or "").strip().lower() == normalized_slot_key
-        item_video_key = str(item.get("video_key") or "").strip()
-        item_channel_key = str(item.get("channel_key") or "").strip().lower()
-        if candidate_video_key and item_video_key == candidate_video_key:
-            bias += weight * decay * (2.3 if same_slot else 1.8)
-        elif candidate_channel_key and item_channel_key == candidate_channel_key:
-            bias += weight * decay * (1.1 if same_slot else 0.7)
-
-    return max(-18.0, min(18.0, bias))
 
 
 def score_candidate_ai(c: VideoCandidate, today: date) -> tuple[float, str]:
@@ -1523,11 +1299,11 @@ def _daily_plan_score(candidate: VideoCandidate, slot: dict[str, str], *, used_c
         return -999.0
 
     traits = _planner_title_traits(candidate)
-    slot_key = slot.get("slot_key", "")
-    vertical = _detect_content_vertical(candidate.title, candidate.channel)
     score = float(candidate.ai_score or 0.0) * 0.62
     score += min(22.0, math.log10(float(candidate.views_per_day or 0.0) + 1.0) * 10.0)
     score += min(14.0, math.log10(float(candidate.view_count or 0.0) + 1.0) * 4.0)
+
+    slot_key = slot.get("slot_key", "")
     if slot_key == "morning":
         if traits["question"] or traits["digits"]:
             score += 9.0
@@ -1553,17 +1329,6 @@ def _daily_plan_score(candidate: VideoCandidate, slot: dict[str, str], *, used_c
         if traits["comparison"]:
             score += 4.0
 
-    # With the current non-cropped horizontal+blur render, dark talk-head clips
-    # underperform badly. Prefer travel/vlog/challenge visuals until we build a
-    # dedicated podcast/business layout.
-    if vertical in {"podcast", "business"}:
-        score -= 26.0
-    elif vertical in {"travel", "vlog", "prank", "challenge", "food"}:
-        score += 8.0
-    elif vertical in {"sports", "gaming"}:
-        score += 3.0
-
-    score += _performance_bias(candidate, slot_key)
     return score
 
 
@@ -2876,7 +2641,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--stride", type=int, default=10, help="Sliding window step in seconds.")
     p.add_argument("--max-pool", type=int, default=50, help="Window pool size before overlap filter.")
     p.add_argument("--overlap-ratio", type=float, default=0.40, help="Max overlap ratio between options.")
-    p.add_argument("--slot-key", default="")
     p.add_argument("--output-dir", default="output")
     p.add_argument("--work-dir", default="work")
     return p
@@ -2908,26 +2672,15 @@ def generate_dashboard(config: DashboardConfig, log_fn: Callable[[str], None] = 
     source_duration = float(info.get("duration") or 0.0)
     source_slug = slugify(source_title, max_len=55)
 
+    cues: List[CaptionCue] = []
+    if subtitle_file and subtitle_file.exists() and subtitle_file.suffix.lower() == ".vtt":
+        cues = parse_vtt(subtitle_file)
+        log_fn(f"Subtitulos encontrados: {subtitle_file.name}")
+    else:
+        log_fn("No hay subtitulos: opciones se repartiran por duracion.")
+
     if source_duration <= 0:
         raise RuntimeError("No se pudo detectar duracion del video.")
-
-    cues, caption_source = load_best_caption_cues(
-        ffmpeg_bin,
-        source_video,
-        subtitle_file,
-        language=config.language,
-        source_duration=source_duration,
-        log_fn=log_fn,
-    )
-    if cues:
-        if caption_source == "faster_whisper":
-            log_fn(f"Subtitulos generados con transcripcion propia ({len(cues)} cues).")
-        elif subtitle_file and subtitle_file.exists():
-            log_fn(f"Subtitulos cargados desde {subtitle_file.name} ({len(cues)} cues).")
-        else:
-            log_fn(f"Subtitulos cargados desde {caption_source} ({len(cues)} cues).")
-    else:
-        log_fn("No hay subtitulos utiles: opciones se repartiran por duracion.")
 
     # Signal analysis for stronger clip ranking.
     analysis_cap = max(60, min(300, int(os.getenv("CLIP_ANALYSIS_MAX_SECONDS", "150"))))
@@ -2973,7 +2726,6 @@ def generate_dashboard(config: DashboardConfig, log_fn: Callable[[str], None] = 
             why_it_may_work=cand.why_it_may_work,
             transcript_preview=cand.transcript_preview,
             signal_tags=cand.signal_tags,
-            slot_key=config.slot_key,
         )
         overlay_hook_text = (
             _strip_clip_prefix(tiktok_title).rstrip(".!?… ").strip()
@@ -2981,30 +2733,11 @@ def generate_dashboard(config: DashboardConfig, log_fn: Callable[[str], None] = 
             or _strip_clip_prefix(cand.short_description).rstrip(".!?… ").strip()
             or _strip_clip_prefix(cand.transcript_preview).rstrip(".!?… ").strip()
         )
-        focus_x = None
-        try:
-            focus_x = detect_subject_focus_x(source_video, start=seg.start, end=seg.end)
-        except Exception:
-            focus_x = None
         log_fn(f"Render option {idx}/{len(selected)} ({seg.start:.1f}s -> {seg.end:.1f}s)")
         subtitle_ass = job_dir / f"option_{idx:02}.ass"
         if cues:
             try:
-                render_cues = cues
-                try:
-                    refined_cues = transcribe_with_faster_whisper(
-                        ffmpeg_bin,
-                        source_video,
-                        language=config.language,
-                        max_seconds=max(20, int(math.ceil(seg.end - seg.start)) + 2),
-                        start_seconds=max(0.0, seg.start - 0.15),
-                    )
-                    if refined_cues:
-                        render_cues = refined_cues
-                        log_fn(f"Option {idx}: subtitulos refinados con Whisper para el clip final.")
-                except Exception as exc:
-                    log_fn(f"Option {idx}: no pude refinar subtitulos con Whisper ({exc}).")
-                if not write_segment_ass(render_cues, seg.start, seg.end, subtitle_ass, hook_text=overlay_hook_text):
+                if not write_segment_ass(cues, seg.start, seg.end, subtitle_ass, hook_text=overlay_hook_text):
                     subtitle_ass = None
             except Exception:
                 subtitle_ass = None
@@ -3019,7 +2752,6 @@ def generate_dashboard(config: DashboardConfig, log_fn: Callable[[str], None] = 
             subtitle_ass=subtitle_ass,
             include_hook_overlay=False,
             fast_render=config.fast_render,
-            focus_x=focus_x,
         )
         (job_dir / preview_name).replace(out_video)
         try:
@@ -3064,8 +2796,6 @@ def generate_dashboard(config: DashboardConfig, log_fn: Callable[[str], None] = 
         "source_url": info.get("webpage_url") or config.url,
         "video_id": str(info.get("id") or candidate.video_id or ""),
         "source_duration": source_duration,
-        "slot_key": config.slot_key,
-        "caption_source": caption_source,
         "options": [asdict(o) for o in options],
     }
     manifest_path = dashboard_dir / "options_manifest.json"
@@ -3088,7 +2818,6 @@ def generate_dashboard(config: DashboardConfig, log_fn: Callable[[str], None] = 
         work_job_dir=str(job_dir),
         source_title=source_title,
         source_url=manifest["source_url"],
-        slot_key=config.slot_key,
         options=options,
     )
 
@@ -3103,7 +2832,6 @@ def main() -> int:
         stride=args.stride,
         max_pool=args.max_pool,
         overlap_ratio=args.overlap_ratio,
-        slot_key=args.slot_key,
         output_dir=args.output_dir,
         work_dir=args.work_dir,
     )
