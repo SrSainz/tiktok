@@ -123,13 +123,13 @@ TRANSCRIBE_WITH_FASTER_WHISPER = os.getenv("TRANSCRIBE_WITH_FASTER_WHISPER", "1"
     "no",
     "off",
 }
-TRANSCRIBE_IF_CAPTIONS_WEAK = os.getenv("TRANSCRIBE_IF_CAPTIONS_WEAK", "1").strip().lower() not in {
+TRANSCRIBE_IF_CAPTIONS_WEAK = os.getenv("TRANSCRIBE_IF_CAPTIONS_WEAK", "0").strip().lower() not in {
     "0",
     "false",
     "no",
     "off",
 }
-TRANSCRIBE_PREFER_WHISPER = os.getenv("TRANSCRIBE_PREFER_WHISPER", "1").strip().lower() not in {
+TRANSCRIBE_PREFER_WHISPER = os.getenv("TRANSCRIBE_PREFER_WHISPER", "0").strip().lower() not in {
     "0",
     "false",
     "no",
@@ -731,7 +731,8 @@ def clean_caption_text(text: str) -> str:
         prev = low
     filtered = _compress_repeated_token_windows(filtered)
     filtered = _trim_caption_tokens(filtered)
-    filtered = _select_best_caption_window(filtered, max_words=8)
+    if len(filtered) > 12:
+        filtered = filtered[:12]
     if _looks_broken_caption(filtered):
         return ""
     if _is_low_value_caption(filtered):
@@ -776,9 +777,17 @@ def chunk_caption_words(text: str, cue_duration: float) -> List[str]:
     if _is_low_value_caption(words):
         return []
 
-    max_chunks_by_time = max(1, int(cue_duration / 0.55))
-    chunk_count_by_words = max(1, math.ceil(len(words) / 3))
-    chunk_count = min(max_chunks_by_time, chunk_count_by_words, 4, len(words))
+    if cue_duration <= 1.8 or len(words) <= 6:
+        return [wrap_caption_lines(words, max_line_chars=24, max_lines=2)]
+
+    if cue_duration <= 3.2:
+        target_words = 6
+    elif cue_duration <= 4.8:
+        target_words = 8
+    else:
+        target_words = 10
+
+    chunk_count = min(2, max(1, math.ceil(len(words) / target_words)))
     words_per_chunk = max(1, math.ceil(len(words) / chunk_count))
 
     chunks: List[str] = []
@@ -789,7 +798,7 @@ def chunk_caption_words(text: str, cue_duration: float) -> List[str]:
             continue
         if _looks_broken_caption(chunk_words):
             continue
-        chunk_text = wrap_caption_lines(chunk_words, max_line_chars=18, max_lines=2).upper()
+        chunk_text = wrap_caption_lines(chunk_words, max_line_chars=24, max_lines=2)
         if chunk_text:
             chunks.append(chunk_text)
     return chunks
@@ -962,33 +971,7 @@ def build_hook_ass_markup(hook_text: str) -> str:
 
 
 def build_caption_ass_markup(chunk: str) -> str:
-    parts = [part for part in chunk.split(r"\N") if part]
-    if not parts:
-        return ass_escape(chunk)
-
-    rendered_lines: List[str] = []
-    highlight_used = False
-    for part in parts:
-        words = part.split()
-        if not words:
-            continue
-        highlight_index = 0
-        for idx, word in enumerate(words):
-            raw = re.sub(r"[^A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9]", "", word, flags=re.UNICODE)
-            if raw and (any(ch.isdigit() for ch in raw) or raw.upper() not in HOOK_STOPWORDS):
-                highlight_index = idx
-                break
-        highlighted: List[str] = []
-        for idx, word in enumerate(words):
-            escaped = ass_escape(word)
-            if not highlight_used and idx == highlight_index:
-                highlighted.append(r"{\1c&H0034FF3C&}" + escaped + r"{\r}")
-                highlight_used = True
-            else:
-                highlighted.append(escaped)
-        rendered_lines.append(" ".join(highlighted))
-
-    return r"\N".join(rendered_lines) if rendered_lines else ass_escape(chunk)
+    return ass_escape(chunk)
 
 
 def chunks_too_similar(a: str, b: str) -> bool:
@@ -1094,8 +1077,8 @@ def write_segment_ass(cues: List[CaptionCue], start: float, end: float, out_path
             "Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,"
             "Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,"
             "MarginR,MarginV,Encoding",
-            "Style: Hook,Arial,70,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,4,0,8,92,92,228,1",
-            "Style: Cap,Arial,60,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,4,0,2,88,88,520,1",
+            "Style: Hook,Arial,66,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,4,0,8,92,92,208,1",
+            "Style: Cap,Arial,56,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,3,0,2,96,96,220,1",
             "",
             "[Events]",
             "Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text",
@@ -1937,20 +1920,6 @@ def run(args: argparse.Namespace) -> int:
 
     segment = choose_segment(cues, source_duration=source_duration, target_duration=args.duration)
     render_cues = cues
-    if cue_source != "faster_whisper":
-        try:
-            refined_cues = transcribe_with_faster_whisper(
-                ffmpeg_bin,
-                source_video,
-                language=args.language,
-                max_seconds=max(20, int(math.ceil(segment.end - segment.start)) + 2),
-                start_seconds=max(0.0, segment.start - 0.15),
-            )
-            if refined_cues:
-                render_cues = refined_cues
-                log("Subtitulos refinados con Whisper para el clip final.")
-        except Exception as exc:
-            log(f"No pude refinar subtitulos con Whisper para el clip final. ({exc})")
 
     file_slug = slugify(selected.title, max_len=60)
     output_file = output_dir / f"{file_slug}_tiktok.mp4"
