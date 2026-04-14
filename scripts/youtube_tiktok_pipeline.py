@@ -128,7 +128,7 @@ TRANSCRIBE_IF_CAPTIONS_WEAK = os.getenv("TRANSCRIBE_IF_CAPTIONS_WEAK", "1").stri
     "no",
     "off",
 }
-TRANSCRIBE_PREFER_WHISPER = os.getenv("TRANSCRIBE_PREFER_WHISPER", "0").strip().lower() not in {
+TRANSCRIBE_PREFER_WHISPER = os.getenv("TRANSCRIBE_PREFER_WHISPER", "1").strip().lower() not in {
     "0",
     "false",
     "no",
