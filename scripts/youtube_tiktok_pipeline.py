@@ -116,6 +116,28 @@ CAPTION_NOISE_LABELS = {
 
 CAPTION_KEEP_SHORT_WORDS = {"o", "u", "y", "vs", "no", "si"}
 
+TRANSCRIBE_WITH_FASTER_WHISPER = os.getenv("TRANSCRIBE_WITH_FASTER_WHISPER", "1").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
+TRANSCRIBE_IF_CAPTIONS_WEAK = os.getenv("TRANSCRIBE_IF_CAPTIONS_WEAK", "1").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
+TRANSCRIBE_PREFER_WHISPER = os.getenv("TRANSCRIBE_PREFER_WHISPER", "0").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
+WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "small").strip() or "small"
+WHISPER_COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "int8").strip() or "int8"
+WHISPER_MAX_SECONDS = max(120, int(os.getenv("WHISPER_MAX_SECONDS", "1500").strip() or "1500"))
+
 
 @dataclass
 class VideoCandidate:
@@ -149,6 +171,9 @@ class SegmentChoice:
 
 def log(message: str) -> None:
     print(f"[pipeline] {message}")
+
+
+_WHISPER_MODEL_CACHE = None
 
 
 def _cookiefile_from_env() -> Optional[str]:
@@ -443,6 +468,158 @@ def parse_vtt(path: Path) -> List[CaptionCue]:
         previous_line = text
         cues.append(CaptionCue(start=parse_ts(cue.start), end=parse_ts(cue.end), text=text))
     return cues
+
+
+def caption_coverage_ratio(cues: List[CaptionCue], source_duration: Optional[float]) -> float:
+    if not cues or not source_duration or source_duration <= 0:
+        return 0.0
+    covered = 0.0
+    for cue in cues:
+        covered += max(0.0, float(cue.end) - float(cue.start))
+    return min(1.0, covered / max(1.0, float(source_duration)))
+
+
+def captions_look_weak(cues: List[CaptionCue], source_duration: Optional[float]) -> bool:
+    if not cues:
+        return True
+    cleaned = [clean_caption_text(cue.text) for cue in cues]
+    meaningful = [text for text in cleaned if text]
+    if len(meaningful) < 8:
+        return True
+    coverage = caption_coverage_ratio(cues, source_duration)
+    if source_duration and source_duration >= 240 and coverage < 0.12:
+        return True
+    avg_words = sum(len(_tokenize_caption_words(text)) for text in meaningful) / max(1, len(meaningful))
+    if avg_words < 2.2:
+        return True
+    unique_ratio = len({text.lower() for text in meaningful}) / max(1, len(meaningful))
+    if unique_ratio < 0.45:
+        return True
+    return False
+
+
+def _get_whisper_model():
+    global _WHISPER_MODEL_CACHE
+    if _WHISPER_MODEL_CACHE is not None:
+        return _WHISPER_MODEL_CACHE
+    from faster_whisper import WhisperModel  # type: ignore
+
+    _WHISPER_MODEL_CACHE = WhisperModel(WHISPER_MODEL_SIZE, device="cpu", compute_type=WHISPER_COMPUTE_TYPE)
+    return _WHISPER_MODEL_CACHE
+
+
+def transcribe_with_faster_whisper(
+    ffmpeg_bin: str,
+    source_video: Path,
+    *,
+    language: str = "es",
+    max_seconds: Optional[int] = None,
+    start_seconds: float = 0.0,
+) -> List[CaptionCue]:
+    if not TRANSCRIBE_WITH_FASTER_WHISPER:
+        return []
+
+    capped_seconds = None
+    if max_seconds is not None:
+        capped_seconds = max(30, min(int(max_seconds), WHISPER_MAX_SECONDS))
+
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_audio:
+        tmp_path = Path(tmp_audio.name)
+
+    cmd = [
+        ffmpeg_bin,
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+    ]
+    if start_seconds > 0:
+        cmd.extend(["-ss", f"{max(0.0, float(start_seconds)):.3f}"])
+    cmd.extend([
+        "-i",
+        str(source_video),
+    ])
+    if capped_seconds is not None:
+        cmd.extend(["-t", str(capped_seconds)])
+    cmd.extend(["-vn", "-ac", "1", "-ar", "16000", str(tmp_path)])
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        tmp_path.unlink(missing_ok=True)
+        raise RuntimeError(f"No se pudo extraer audio para Whisper: {(proc.stderr or '')[-800:]}")
+
+    try:
+        model = _get_whisper_model()
+        segments, _info = model.transcribe(
+            str(tmp_path),
+            language=(language or "es"),
+            vad_filter=True,
+            beam_size=1,
+            word_timestamps=False,
+        )
+        cues: List[CaptionCue] = []
+        offset = max(0.0, float(start_seconds))
+        for seg in segments:
+            text = normalize_text(getattr(seg, "text", "") or "")
+            if not text:
+                continue
+            cues.append(
+                CaptionCue(
+                    start=offset + float(getattr(seg, "start", 0.0) or 0.0),
+                    end=offset + float(getattr(seg, "end", 0.0) or 0.0),
+                    text=text,
+                )
+            )
+        return cues
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+def load_best_caption_cues(
+    ffmpeg_bin: str,
+    source_video: Path,
+    subtitle_file: Optional[Path],
+    *,
+    language: str,
+    source_duration: Optional[float],
+    log_fn=log,
+) -> tuple[List[CaptionCue], str]:
+    parsed_cues: List[CaptionCue] = []
+    if subtitle_file and subtitle_file.exists() and subtitle_file.suffix.lower() == ".vtt":
+        parsed_cues = parse_vtt(subtitle_file)
+        log_fn(f"Subtitulos encontrados: {subtitle_file.name}")
+    else:
+        log_fn("No hay subtitulos VTT disponibles.")
+
+    prefer_whisper = (
+        TRANSCRIBE_WITH_FASTER_WHISPER
+        and TRANSCRIBE_PREFER_WHISPER
+        and (source_duration is None or source_duration <= WHISPER_MAX_SECONDS)
+    )
+    should_transcribe = TRANSCRIBE_WITH_FASTER_WHISPER and (
+        prefer_whisper
+        or not parsed_cues
+        or (TRANSCRIBE_IF_CAPTIONS_WEAK and captions_look_weak(parsed_cues, source_duration))
+    )
+
+    if should_transcribe:
+        try:
+            max_seconds = int(source_duration) if source_duration else WHISPER_MAX_SECONDS
+            if prefer_whisper:
+                log_fn("Generando transcripcion propia con Whisper como fuente principal de subtitulos.")
+            else:
+                log_fn("Generando transcripcion propia con Whisper por calidad de captions.")
+            whisper_cues = transcribe_with_faster_whisper(
+                ffmpeg_bin,
+                source_video,
+                language=language,
+                max_seconds=max_seconds,
+            )
+            if whisper_cues:
+                return whisper_cues, "faster_whisper"
+        except Exception as exc:
+            log_fn(f"Whisper no estuvo disponible o fallo; sigo con captions existentes. ({exc})")
+
+    return parsed_cues, "youtube_vtt" if parsed_cues else "none"
 
 
 def pick_hook(cues: Iterable[CaptionCue]) -> str:
@@ -1743,14 +1920,20 @@ def run(args: argparse.Namespace) -> int:
     log(f"Descargando fuente: {selected.url}")
     source_video, subtitle_file, info = download_source_video(selected, job_dir=job_dir, language=args.language)
 
-    cues: List[CaptionCue] = []
-    if subtitle_file and subtitle_file.exists() and subtitle_file.suffix.lower() == ".vtt":
-        log(f"Subtitulos detectados: {subtitle_file.name}")
-        cues = parse_vtt(subtitle_file)
-    else:
-        log("No hay subtitulos VTT disponibles; se renderiza sin subtitulos.")
-
     source_duration = info.get("duration") or selected.duration
+    cues, cue_source = load_best_caption_cues(
+        ffmpeg_bin,
+        source_video,
+        subtitle_file,
+        language=args.language,
+        source_duration=float(source_duration) if source_duration else None,
+        log_fn=log,
+    )
+    if cue_source == "none":
+        log("No hay subtitulos utilizables; se renderiza sin subtitulos.")
+    else:
+        log(f"Fuente de subtitulos usada: {cue_source}")
+
     segment = choose_segment(cues, source_duration=source_duration, target_duration=args.duration)
 
     file_slug = slugify(selected.title, max_len=60)
