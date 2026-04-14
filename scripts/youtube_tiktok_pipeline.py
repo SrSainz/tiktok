@@ -1412,34 +1412,29 @@ def render_short(
     fade_out_start = max(0.0, clip_duration - 0.16)
     if fast_render:
         fast_fade_out_start = max(0.0, clip_duration - 0.14)
-        fast_intro = (
-            "[vpre]scale="
-            "w='if(lt(t,0.45),720*(1.04-0.04*t/0.45),720)':"
-            "h='if(lt(t,0.45),1280*(1.04-0.04*t/0.45),1280)':"
-            "eval=frame,crop=720:1280[vzoom]"
-        )
         fast_comp = (
             "[0:v]scale=720:1280:force_original_aspect_ratio=increase,"
-            "crop=720:1280,boxblur=12:6[bg];"
+            "crop=720:1280,boxblur=18:10[bg];"
             "[0:v]scale=720:1280:force_original_aspect_ratio=decrease,"
-            "setsar=1[fg];"
-            "[bg][fg]overlay=(W-w)/2:(H-h)/2[vpre]"
+            "setsar=1,eq=contrast=1.05:saturation=1.10[fg];"
+            "[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1[vbase]"
         )
-        fast_chains = [fast_comp, fast_intro]
-        fast_label = "[vzoom]"
+        fast_chains = [fast_comp]
+        fast_label = "[vbase]"
         if subtitle_ass and subtitle_ass.exists():
-            fast_chains.append(f"{fast_label}ass='{ass_filter_path(subtitle_ass)}'[vsub]")
+            fast_chains.append(f"{fast_label}ass='{ass_filter_path(subtitle_ass)}',setsar=1[vsub]")
             fast_label = "[vsub]"
         if include_hook_overlay and hook_text.strip():
             fast_chains.append(
                 f"{fast_label}drawbox=x=40:y=92:w=640:h=120:color=black@0.24:t=fill,"
                 "drawtext="
                 f"font=Arial:text='{escape_drawtext(hook_text)}':"
-                "x=(w-text_w)/2:y=128:fontsize=34:fontcolor=white:borderw=2:bordercolor=black[vhook]"
+                "x=(w-text_w)/2:y=128:fontsize=34:fontcolor=white:borderw=2:bordercolor=black,"
+                "setsar=1[vhook]"
             )
             fast_label = "[vhook]"
         fast_chains.append(
-            f"{fast_label}fade=t=in:st=0:d=0.14,fade=t=out:st={fast_fade_out_start:.3f}:d=0.14[vout]"
+            f"{fast_label}setsar=1,fade=t=in:st=0:d=0.14,fade=t=out:st={fast_fade_out_start:.3f}:d=0.14[vout]"
         )
         fast_cmd = [
             ffmpeg_bin,
@@ -1495,35 +1490,29 @@ def render_short(
         finalize_clip_with_outro(ffmpeg_bin, main_output, output_video, branded_outro, fast_render=True)
         return
 
-    intro_transition = (
-        "[vpre]scale="
-        "w='if(lt(t,0.70),1080*(1.08-0.08*t/0.70),1080)':"
-        "h='if(lt(t,0.70),1920*(1.08-0.08*t/0.70),1920)':"
-        "eval=frame,crop=1080:1920[vzoom]"
-    )
     base_comp = (
         "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,"
         "crop=1080:1920,boxblur=22:12[bg];"
         "[0:v]scale=1080:1920:force_original_aspect_ratio=decrease,"
         "setsar=1,eq=contrast=1.05:saturation=1.10[fg];"
-        "[bg][fg]overlay=(W-w)/2:(H-h)/2[vpre]"
+        "[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1[vbase]"
     )
     chains = [base_comp]
-    chains.append(intro_transition)
-    current_label = "[vzoom]"
+    current_label = "[vbase]"
     if subtitle_ass and subtitle_ass.exists():
-        chains.append(f"{current_label}ass='{ass_filter_path(subtitle_ass)}'[vsub]")
+        chains.append(f"{current_label}ass='{ass_filter_path(subtitle_ass)}',setsar=1[vsub]")
         current_label = "[vsub]"
     if include_hook_overlay and hook_text.strip():
         chains.append(
             f"{current_label}drawbox=x=60:y=120:w=960:h=170:color=black@0.28:t=fill,"
             "drawtext="
             f"font=Arial:text='{escape_drawtext(hook_text)}':"
-            "x=(w-text_w)/2:y=165:fontsize=52:fontcolor=white:borderw=2:bordercolor=black[vhook]"
+            "x=(w-text_w)/2:y=165:fontsize=52:fontcolor=white:borderw=2:bordercolor=black,"
+            "setsar=1[vhook]"
         )
         current_label = "[vhook]"
     chains.append(
-        f"{current_label}fade=t=in:st=0:d=0.18,fade=t=out:st={fade_out_start:.3f}:d=0.16[vout]"
+        f"{current_label}setsar=1,fade=t=in:st=0:d=0.18,fade=t=out:st={fade_out_start:.3f}:d=0.16[vout]"
     )
     output_map = "[vout]"
 
@@ -1585,26 +1574,19 @@ def render_short(
 
     # Fallback for constrained hosts (Railway-like): lower resolution + lighter encode.
     fb_fade_out_start = max(0.0, clip_duration - 0.16)
-    fallback_intro = (
-        "[vpre]scale="
-        "w='if(lt(t,0.60),720*(1.07-0.07*t/0.60),720)':"
-        "h='if(lt(t,0.60),1280*(1.07-0.07*t/0.60),1280)':"
-        "eval=frame,crop=720:1280[vzoom]"
-    )
     fallback_comp = (
         "[0:v]scale=720:1280:force_original_aspect_ratio=increase,"
         "crop=720:1280,boxblur=18:10[bg];"
         "[0:v]scale=720:1280:force_original_aspect_ratio=decrease,setsar=1[fg];"
-        "[bg][fg]overlay=(W-w)/2:(H-h)/2[vpre]"
+        "[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1[vbase]"
     )
     fallback_chains = [fallback_comp]
-    fallback_chains.append(fallback_intro)
-    fallback_label = "[vzoom]"
+    fallback_label = "[vbase]"
     if subtitle_ass and subtitle_ass.exists():
-        fallback_chains.append(f"{fallback_label}ass='{ass_filter_path(subtitle_ass)}'[vsub]")
+        fallback_chains.append(f"{fallback_label}ass='{ass_filter_path(subtitle_ass)}',setsar=1[vsub]")
         fallback_label = "[vsub]"
     fallback_chains.append(
-        f"{fallback_label}fade=t=in:st=0:d=0.18,fade=t=out:st={fb_fade_out_start:.3f}:d=0.16[v]"
+        f"{fallback_label}setsar=1,fade=t=in:st=0:d=0.18,fade=t=out:st={fb_fade_out_start:.3f}:d=0.16[v]"
     )
     fallback_cmd = [
         ffmpeg_bin,
