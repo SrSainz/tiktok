@@ -12,7 +12,6 @@ Flow:
 from __future__ import annotations
 
 import argparse
-import html
 import json
 import math
 import os
@@ -20,7 +19,6 @@ import re
 import subprocess
 import sys
 import time
-import unicodedata
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -40,20 +38,11 @@ if hasattr(sys.stdout, "reconfigure"):
 
 
 DEFAULT_ES_CHANNELS = [
-    "https://www.youtube.com/@YoSoyPlex/videos",
-    "https://www.youtube.com/@nilojeda/videos",
-    "https://www.youtube.com/@hiclavero/videos",
-    "https://www.youtube.com/@pedrobuerbaum/videos",
-    "https://www.youtube.com/@ibaillanos/videos",
-    "https://www.youtube.com/@AuronPlay/videos",
-    "https://www.youtube.com/@illojuan_/videos",
-    "https://www.youtube.com/@TheGrefg/videos",
+    "https://www.youtube.com/@Ibai/videos",
     "https://www.youtube.com/@elrubiusOMG/videos",
-    "https://www.youtube.com/@willyrex/videos",
-    "https://www.youtube.com/@djmariio/videos",
-    "https://www.youtube.com/@xbuyer/videos",
-    "https://www.youtube.com/@byViruZz/videos",
-    "https://www.youtube.com/@TheWildProject/videos",
+    "https://www.youtube.com/@VEGETTA777/videos",
+    "https://www.youtube.com/@AuronPlay/videos",
+    "https://www.youtube.com/@Mikecrack/videos",
 ]
 
 IMPACT_WORDS = {
@@ -74,47 +63,6 @@ IMPACT_WORDS = {
     "top",
     "record",
 }
-
-CAPTION_FILLER_WORDS = {
-    "a",
-    "ah",
-    "aja",
-    "al",
-    "bro",
-    "buah",
-    "eh",
-    "ehh",
-    "hmm",
-    "jaja",
-    "jeje",
-    "mmm",
-    "oh",
-    "oye",
-    "pam",
-    "pim",
-    "pues",
-    "pum",
-    "vale",
-    "ver",
-    "wow",
-    "ya",
-}
-
-CAPTION_NOISE_LABELS = {
-    "aplausos",
-    "nbsp",
-    "amp",
-    "quot",
-    "lt",
-    "gt",
-    "music",
-    "musica",
-    "música",
-    "risas",
-    "sonido",
-}
-
-CAPTION_KEEP_SHORT_WORDS = {"o", "u", "y", "vs", "no", "si"}
 
 
 @dataclass
@@ -204,20 +152,7 @@ def fmt_srt(seconds: float) -> str:
 
 
 def normalize_text(text: str) -> str:
-    text = html.unescape(text or "")
-    text = text.replace("\xa0", " ")
-    text = unicodedata.normalize("NFKC", text)
-    if any(marker in text for marker in ("Ã", "Â", "â", "€", "™", "œ", "�")):
-        try:
-            repaired = text.encode("latin-1").decode("utf-8")
-            if repaired.count("Ã") + repaired.count("Â") + repaired.count("�") < text.count("Ã") + text.count("Â") + text.count("�"):
-                text = repaired
-        except Exception:
-            pass
     text = re.sub(r"<[^>]+>", "", text)
-    text = text.replace("&nbsp;", " ")
-    text = re.sub(r"\b(?:nbsp|amp|quot|lt|gt)\b", " ", text, flags=re.IGNORECASE)
-    text = re.sub(r"[♪♫]+", " ", text)
     text = text.replace("\n", " ")
     text = re.sub(r"\s+", " ", text).strip()
     return text
@@ -239,126 +174,6 @@ def score_text(text: str) -> int:
     numeric_hits = sum(1 for t in tokens if t.isdigit())
     punct_bonus = text.count("!") + text.count("?")
     return impact_hits * 4 + numeric_hits * 2 + punct_bonus
-
-
-def _tokenize_caption_words(text: str) -> List[str]:
-    return re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9]+", text, flags=re.UNICODE)
-
-
-def _is_meaningful_caption_word(word: str) -> bool:
-    token = word.strip().lower()
-    if not token:
-        return False
-    if token in CAPTION_KEEP_SHORT_WORDS:
-        return True
-    if any(ch.isdigit() for ch in token):
-        return True
-    if token in IMPACT_WORDS:
-        return True
-    if token in CAPTION_FILLER_WORDS:
-        return False
-    return len(token) >= 4 and token.upper() not in HOOK_STOPWORDS
-
-
-def _trim_caption_tokens(tokens: List[str]) -> List[str]:
-    trimmed = list(tokens)
-    while trimmed and not _is_meaningful_caption_word(trimmed[0]):
-        trimmed.pop(0)
-    while trimmed and not _is_meaningful_caption_word(trimmed[-1]):
-        trimmed.pop()
-    return trimmed
-
-
-def _compress_repeated_token_windows(tokens: List[str]) -> List[str]:
-    if len(tokens) < 6:
-        return list(tokens)
-    result = list(tokens)
-    for window_size in (5, 4, 3, 2):
-        changed = True
-        while changed and len(result) >= window_size * 2:
-            changed = False
-            compact: List[str] = []
-            i = 0
-            while i < len(result):
-                window = [t.lower() for t in result[i : i + window_size]]
-                next_window = [t.lower() for t in result[i + window_size : i + window_size * 2]]
-                if len(window) == window_size and window == next_window:
-                    compact.extend(result[i : i + window_size])
-                    i += window_size * 2
-                    changed = True
-                    continue
-                compact.append(result[i])
-                i += 1
-            result = compact
-    return result
-
-
-def _looks_broken_caption(tokens: List[str]) -> bool:
-    if not tokens:
-        return True
-    lowered = [token.lower() for token in tokens if token]
-    long_tokens = [token for token in lowered if len(token) >= 4 and not any(ch.isdigit() for ch in token)]
-    suspicious_html = sum(1 for token in lowered if token in CAPTION_NOISE_LABELS)
-    short_noise = sum(
-        1
-        for token in lowered
-        if len(token) <= 2 and token not in CAPTION_KEEP_SHORT_WORDS and not any(ch.isdigit() for ch in token)
-    )
-    malformed = 0
-    for token in long_tokens:
-        vowels = sum(1 for ch in token if ch in "aeiouáéíóúü")
-        if vowels == 0:
-            malformed += 1
-            continue
-        if token.endswith(("nbsp", "quot", "amp")):
-            malformed += 1
-            continue
-        if len(token) >= 5 and len(set(token)) <= 2:
-            malformed += 1
-    if suspicious_html:
-        return True
-    if short_noise / max(1, len(lowered)) >= 0.34:
-        return True
-    if malformed and malformed / max(1, len(long_tokens)) >= 0.4:
-        return True
-    return False
-
-
-def _select_best_caption_window(tokens: List[str], max_words: int = 8) -> List[str]:
-    if len(tokens) <= max_words:
-        return list(tokens)
-    best_window = list(tokens[:max_words])
-    best_score = -10**9
-    for start in range(0, len(tokens) - max_words + 1):
-        window = list(tokens[start : start + max_words])
-        lowered = [token.lower() for token in window]
-        meaningful = [token for token in lowered if _is_meaningful_caption_word(token)]
-        duplicate_penalty = len(lowered) - len(set(lowered))
-        html_penalty = sum(1 for token in lowered if token in CAPTION_NOISE_LABELS)
-        digit_bonus = sum(1 for token in lowered if any(ch.isdigit() for ch in token))
-        score = len(set(meaningful)) * 3 + len(meaningful) + digit_bonus * 2 - duplicate_penalty * 3 - html_penalty * 6
-        if score > best_score:
-            best_score = score
-            best_window = window
-    return _trim_caption_tokens(best_window)
-
-
-def _is_low_value_caption(tokens: List[str]) -> bool:
-    if not tokens:
-        return True
-    lowered = [token.lower() for token in tokens if token]
-    unique = {token for token in lowered if token}
-    meaningful = [token for token in lowered if _is_meaningful_caption_word(token)]
-    if not meaningful:
-        return True
-    if len(unique) == 1 and len(lowered) >= 2:
-        return True
-    if len(lowered) <= 3 and len(meaningful) <= 1 and not any(any(ch.isdigit() for ch in token) for token in lowered):
-        return True
-    filler_ratio = sum(1 for token in lowered if token in CAPTION_FILLER_WORDS or token.upper() in HOOK_STOPWORDS) / max(1, len(lowered))
-    if filler_ratio >= 0.7 and len(meaningful) <= 2:
-        return True
-    return False
 
 
 def parse_upload_date_ymd(upload_date: Optional[str]) -> Optional[date]:
@@ -424,23 +239,10 @@ def is_within_last_days(upload_date: Optional[str], days: int, today: date) -> b
 
 def parse_vtt(path: Path) -> List[CaptionCue]:
     cues: List[CaptionCue] = []
-    previous_line = ""
     for cue in webvtt.read(str(path)):
-        line_candidates = [normalize_text(line) for line in str(cue.text or "").splitlines()]
-        line_candidates = [line for line in line_candidates if line]
-        if not line_candidates:
-            continue
-        preferred = line_candidates[-1]
-        if preferred.lower() == previous_line.lower() and len(line_candidates) >= 2:
-            preferred = line_candidates[-2]
-        if len(preferred) < 6:
-            longest = max(line_candidates, key=len)
-            if len(longest) > len(preferred):
-                preferred = longest
-        text = normalize_text(preferred)
+        text = normalize_text(cue.text)
         if not text:
             continue
-        previous_line = text
         cues.append(CaptionCue(start=parse_ts(cue.start), end=parse_ts(cue.end), text=text))
     return cues
 
@@ -449,26 +251,16 @@ def pick_hook(cues: Iterable[CaptionCue]) -> str:
     best_text = ""
     best_score = -1
     for cue in cues:
-        clean = clean_caption_text(cue.text)
-        if not clean:
-            continue
-        focus = extract_hook_focus_text(clean) or clean
-        tokens = _trim_caption_tokens(_tokenize_caption_words(focus))
-        if _is_low_value_caption(tokens):
-            continue
-        candidate = " ".join(tokens[:6]).strip()
-        if not candidate:
-            continue
-        s = score_text(candidate) + min(6, len(tokens)) + (2 if "?" in cue.text else 0)
+        s = score_text(cue.text)
         if s > best_score:
             best_score = s
-            best_text = candidate
+            best_text = cue.text
     if not best_text:
         return "NO TE LO PIERDAS"
 
-    tokens = _trim_caption_tokens(_tokenize_caption_words(best_text))
-    short = " ".join(tokens[:6]).strip()
-    if len(short) < 6:
+    tokens = re.findall(r"[A-Za-z0-9]+", best_text)
+    short = " ".join(tokens[:6]).upper()[:34].strip()
+    if len(short) < 10:
         short = "NO TE LO PIERDAS"
     return short
 
@@ -526,39 +318,10 @@ def fmt_ass(seconds: float) -> str:
 
 def clean_caption_text(text: str) -> str:
     text = normalize_text(text)
-    if re.search(r"\b[A-ZÁÉÍÓÚÜÑ]\s+[A-ZÁÉÍÓÚÜÑ]{3,}\b", text):
-        return ""
     text = re.sub(r"\[[^\]]+\]", "", text)
     text = re.sub(r"\([^)]+\)", "", text)
-    text = re.sub(r"\b(?:music|musica|música|aplausos|risas|sonido original)\b", " ", text, flags=re.IGNORECASE)
-    text = re.sub(r"\b([A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9]+)(?:\s+\1\b){1,}", r"\1", text, flags=re.IGNORECASE)
     text = re.sub(r"\s+", " ", text).strip()
-    tokens = _trim_caption_tokens(_tokenize_caption_words(text))
-    tokens = _compress_repeated_token_windows(tokens)
-    if _looks_broken_caption(tokens):
-        return ""
-    if _is_low_value_caption(tokens):
-        return ""
-    filtered: List[str] = []
-    prev = ""
-    for token in tokens:
-        low = token.lower()
-        if low in CAPTION_NOISE_LABELS:
-            continue
-        if len(low) <= 2 and low not in CAPTION_KEEP_SHORT_WORDS and not any(ch.isdigit() for ch in low):
-            continue
-        if low == prev and low not in CAPTION_KEEP_SHORT_WORDS:
-            continue
-        filtered.append(token)
-        prev = low
-    filtered = _compress_repeated_token_windows(filtered)
-    filtered = _trim_caption_tokens(filtered)
-    filtered = _select_best_caption_window(filtered, max_words=8)
-    if _looks_broken_caption(filtered):
-        return ""
-    if _is_low_value_caption(filtered):
-        return ""
-    return " ".join(filtered)
+    return text
 
 
 def wrap_caption_lines(words: List[str], max_line_chars: int = 24, max_lines: int = 1) -> str:
@@ -588,29 +351,18 @@ def wrap_caption_lines(words: List[str], max_line_chars: int = 24, max_lines: in
 
 
 def chunk_caption_words(text: str, cue_duration: float) -> List[str]:
-    clean = clean_caption_text(text)
-    words = _trim_caption_tokens(_tokenize_caption_words(clean))
+    words = [w for w in re.findall(r"\w+", text, flags=re.UNICODE) if w]
     if not words:
-        return []
-    words = _compress_repeated_token_windows(words)
-    if _looks_broken_caption(words):
-        return []
-    if _is_low_value_caption(words):
         return []
 
     max_chunks_by_time = max(1, int(cue_duration / 0.55))
     chunk_count_by_words = max(1, math.ceil(len(words) / 3))
-    chunk_count = min(max_chunks_by_time, chunk_count_by_words, 4, len(words))
+    chunk_count = min(max_chunks_by_time, chunk_count_by_words, 6, len(words))
     words_per_chunk = max(1, math.ceil(len(words) / chunk_count))
 
     chunks: List[str] = []
     for i in range(0, len(words), words_per_chunk):
-        chunk_words = _trim_caption_tokens(words[i : i + words_per_chunk])
-        chunk_words = _compress_repeated_token_windows(chunk_words)
-        if not chunk_words or _is_low_value_caption(chunk_words):
-            continue
-        if _looks_broken_caption(chunk_words):
-            continue
+        chunk_words = words[i : i + words_per_chunk]
         chunk_text = wrap_caption_lines(chunk_words, max_line_chars=18, max_lines=2).upper()
         if chunk_text:
             chunks.append(chunk_text)
@@ -649,10 +401,8 @@ HOOK_STOPWORDS = {
     "ESO",
     "ESTA",
     "ESTE",
-    "ESTO",
     "FUE",
     "HAY",
-    "AHORA",
     "LA",
     "LAS",
     "LE",
@@ -662,7 +412,6 @@ HOOK_STOPWORDS = {
     "ME",
     "MI",
     "MUY",
-    "MISMO",
     "NO",
     "O",
     "PARA",
@@ -673,7 +422,6 @@ HOOK_STOPWORDS = {
     "SERA",
     "SERIA",
     "SI",
-    "ASI",
     "SOMOS",
     "SON",
     "SOY",
@@ -732,9 +480,6 @@ def extract_hook_focus_text(text: str) -> str:
     words = re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9]+", clean, flags=re.UNICODE)
     if not words:
         return ""
-    words = _compress_repeated_token_windows(words)
-    if _looks_broken_caption(words):
-        return ""
 
     filtered = [
         word
@@ -753,11 +498,6 @@ def build_hook_lines(hook_text: str) -> List[str]:
     words = [word.upper() for word in re.findall(r"\w+", clean, flags=re.UNICODE)]
     if not words:
         return []
-
-    if len(words) >= 4 and words[:2] == words[2:4]:
-        words = words[:2]
-    elif len(words) >= 2 and len(set(words[:2])) == 1:
-        words = [words[0], *words[2:]]
 
     selected = words[:4]
     if len(selected) >= 4:
@@ -783,36 +523,6 @@ def build_hook_ass_markup(hook_text: str) -> str:
     return r"{\1c&H0034FF3C&}" + ass_escape(lines[0]) + r"{\r}\N" + ass_escape(lines[1])
 
 
-def build_caption_ass_markup(chunk: str) -> str:
-    parts = [part for part in chunk.split(r"\N") if part]
-    if not parts:
-        return ass_escape(chunk)
-
-    rendered_lines: List[str] = []
-    highlight_used = False
-    for part in parts:
-        words = part.split()
-        if not words:
-            continue
-        highlight_index = 0
-        for idx, word in enumerate(words):
-            raw = re.sub(r"[^A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9]", "", word, flags=re.UNICODE)
-            if raw and (any(ch.isdigit() for ch in raw) or raw.upper() not in HOOK_STOPWORDS):
-                highlight_index = idx
-                break
-        highlighted: List[str] = []
-        for idx, word in enumerate(words):
-            escaped = ass_escape(word)
-            if not highlight_used and idx == highlight_index:
-                highlighted.append(r"{\1c&H0034FF3C&}" + escaped + r"{\r}")
-                highlight_used = True
-            else:
-                highlighted.append(escaped)
-        rendered_lines.append(" ".join(highlighted))
-
-    return r"\N".join(rendered_lines) if rendered_lines else ass_escape(chunk)
-
-
 def chunks_too_similar(a: str, b: str) -> bool:
     a_words = set(re.findall(r"\w+", a.lower(), flags=re.UNICODE))
     b_words = set(re.findall(r"\w+", b.lower(), flags=re.UNICODE))
@@ -826,7 +536,6 @@ def write_segment_ass(cues: List[CaptionCue], start: float, end: float, out_path
     events: List[str] = []
     last_clean = ""
     recent_chunks: List[str] = []
-    recent_clean_texts: List[str] = []
     segment_duration = max(0.1, end - start)
 
     hook_markup = build_hook_ass_markup(hook_text)
@@ -851,17 +560,6 @@ def write_segment_ass(cues: List[CaptionCue], start: float, end: float, out_path
         if not clean:
             continue
         if clean.lower() == last_clean.lower():
-            continue
-        clean_norm = clean.lower().strip()
-        redundant_cue = False
-        for prev in recent_clean_texts:
-            if clean_norm == prev or clean_norm in prev:
-                redundant_cue = True
-                break
-            if chunks_too_similar(clean_norm, prev) and len(clean_norm) <= (len(prev) + 12):
-                redundant_cue = True
-                break
-        if redundant_cue:
             continue
 
         chunks = chunk_caption_words(clean, cue_dur)
@@ -891,14 +589,12 @@ def write_segment_ass(cues: List[CaptionCue], start: float, end: float, out_path
 
             events.append(
                 "Dialogue: 0,"
-                f"{fmt_ass(part_start)},{fmt_ass(part_end)},Cap,,0,0,0,,{build_caption_ass_markup(chunk)}"
+                f"{fmt_ass(part_start)},{fmt_ass(part_end)},Cap,,0,0,0,,{ass_escape(chunk)}"
             )
             recent_chunks.append(chunk_norm)
             recent_chunks = recent_chunks[-4:]
 
         last_clean = clean
-        recent_clean_texts.append(clean_norm)
-        recent_clean_texts = recent_clean_texts[-3:]
 
     if not events:
         return False
@@ -916,8 +612,8 @@ def write_segment_ass(cues: List[CaptionCue], start: float, end: float, out_path
             "Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,"
             "Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,"
             "MarginR,MarginV,Encoding",
-            "Style: Hook,Arial,70,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,4,0,8,92,92,228,1",
-            "Style: Cap,Arial,60,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,4,0,2,88,88,520,1",
+            "Style: Hook,Arial,74,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,4,0,8,96,96,180,1",
+            "Style: Cap,Arial,58,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,3,0,2,84,84,360,1",
             "",
             "[Events]",
             "Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text",
@@ -1218,114 +914,6 @@ def locate_subtitle(info: dict, job_dir: Path, preferred_lang: str) -> Optional[
     return candidates[0]
 
 
-def locate_brand_outro() -> Optional[Path]:
-    configured = os.getenv("BRAND_OUTRO_FILE", "").strip()
-    candidates: List[Path] = []
-    if configured:
-        candidates.append(Path(configured))
-    project_root = Path(__file__).resolve().parents[1]
-    candidates.append(project_root / "outro.mp4")
-    for candidate in candidates:
-        try:
-            resolved = candidate.expanduser().resolve()
-        except Exception:
-            resolved = candidate.expanduser()
-        if resolved.exists() and resolved.is_file():
-            return resolved
-    return None
-
-
-def finalize_clip_with_outro(
-    ffmpeg_bin: str,
-    main_clip: Path,
-    output_video: Path,
-    outro_video: Optional[Path],
-    *,
-    fast_render: bool = False,
-) -> None:
-    if not outro_video or not outro_video.exists():
-        if main_clip != output_video:
-            if output_video.exists():
-                output_video.unlink()
-            main_clip.replace(output_video)
-        return
-
-    output_width = 720 if fast_render else 1080
-    output_height = 1280 if fast_render else 1920
-    blur = "14:7" if fast_render else "22:12"
-    preset = "ultrafast" if fast_render else "superfast"
-    crf = "24" if fast_render else "23"
-    maxrate = "2200k" if fast_render else "4500k"
-    bufsize = "4400k" if fast_render else "9000k"
-
-    cmd = [
-        ffmpeg_bin,
-        "-y",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-i",
-        str(main_clip.name),
-        "-i",
-        str(outro_video),
-        "-filter_complex",
-        ";".join(
-            [
-                f"[0:v]scale={output_width}:{output_height},setsar=1,format=yuv420p,fps=30[v0]",
-                f"[1:v]scale={output_width}:{output_height}:force_original_aspect_ratio=increase,crop={output_width}:{output_height},boxblur={blur}[obg]",
-                f"[1:v]scale={output_width}:{output_height}:force_original_aspect_ratio=decrease,setsar=1,eq=contrast=1.03:saturation=1.05[ofg]",
-                "[obg][ofg]overlay=(W-w)/2:(H-h)/2,setsar=1,format=yuv420p,fps=30,fade=t=in:st=0:d=0.12[v1]",
-                "[0:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a0]",
-                "[1:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,afade=t=in:st=0:d=0.06[a1]",
-                "[v0][a0][v1][a1]concat=n=2:v=1:a=1[v][a]",
-            ]
-        ),
-        "-map",
-        "[v]",
-        "-map",
-        "[a]",
-        "-r",
-        "30",
-        "-c:v",
-        "libx264",
-        "-profile:v",
-        "high",
-        "-level:v",
-        "4.1",
-        "-preset",
-        preset,
-        "-crf",
-        crf,
-        "-maxrate",
-        maxrate,
-        "-bufsize",
-        bufsize,
-        "-pix_fmt",
-        "yuv420p",
-        "-c:a",
-        "aac",
-        "-ar",
-        "48000",
-        "-b:a",
-        "128k",
-        "-movflags",
-        "+faststart",
-        str(output_video.name),
-    ]
-    proc = subprocess.run(cmd, cwd=main_clip.parent, capture_output=True, text=True)
-    if proc.returncode == 0:
-        try:
-            main_clip.unlink(missing_ok=True)
-        except Exception:
-            pass
-        return
-
-    log(f"No se pudo añadir outro de marca; se mantiene el clip base. Detalle: {(proc.stderr or '')[-300:]}")
-    if output_video.exists():
-        output_video.unlink()
-    main_clip.replace(output_video)
-
-
 def download_source_video(candidate: VideoCandidate, job_dir: Path, language: str) -> tuple[Path, Optional[Path], dict]:
     ffmpeg_bin = imageio_ffmpeg.get_ffmpeg_exe()
     ydl_opts = _apply_yt_auth_opts({
@@ -1400,117 +988,18 @@ def render_short(
     hook_text: str,
     subtitle_ass: Path | None = None,
     include_hook_overlay: bool = False,
-    fast_render: bool = False,
 ) -> None:
-    branded_outro = locate_brand_outro()
-    main_output = output_video.with_name(f"{output_video.stem}.main{output_video.suffix}")
-    if main_output.exists():
-        main_output.unlink()
-    if output_video.exists():
-        output_video.unlink()
     clip_duration = max(0.15, segment.end - segment.start)
     fade_out_start = max(0.0, clip_duration - 0.16)
-    if fast_render:
-        fast_fade_out_start = max(0.0, clip_duration - 0.14)
-        fast_intro = (
-            "[vpre]scale="
-            "w='if(lt(t,0.45),720*(1.04-0.04*t/0.45),720)':"
-            "h='if(lt(t,0.45),1280*(1.04-0.04*t/0.45),1280)':"
-            "eval=frame,crop=720:1280[vzoom]"
-        )
-        fast_comp = (
-            "[0:v]scale=720:1280:force_original_aspect_ratio=increase,"
-            "crop=720:1280,boxblur=12:6[bg];"
-            "[0:v]scale=720:1280:force_original_aspect_ratio=decrease,"
-            "setsar=1[fg];"
-            "[bg][fg]overlay=(W-w)/2:(H-h)/2[vpre]"
-        )
-        fast_chains = [fast_comp, fast_intro]
-        fast_label = "[vzoom]"
-        if subtitle_ass and subtitle_ass.exists():
-            fast_chains.append(f"{fast_label}ass='{ass_filter_path(subtitle_ass)}'[vsub]")
-            fast_label = "[vsub]"
-        if include_hook_overlay and hook_text.strip():
-            fast_chains.append(
-                f"{fast_label}drawbox=x=40:y=92:w=640:h=120:color=black@0.24:t=fill,"
-                "drawtext="
-                f"font=Arial:text='{escape_drawtext(hook_text)}':"
-                "x=(w-text_w)/2:y=128:fontsize=34:fontcolor=white:borderw=2:bordercolor=black[vhook]"
-            )
-            fast_label = "[vhook]"
-        fast_chains.append(
-            f"{fast_label}fade=t=in:st=0:d=0.14,fade=t=out:st={fast_fade_out_start:.3f}:d=0.14[vout]"
-        )
-        fast_cmd = [
-            ffmpeg_bin,
-            "-y",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-ss",
-            f"{segment.start:.3f}",
-            "-i",
-            str(input_video.name),
-            "-t",
-            f"{clip_duration:.3f}",
-            "-filter_complex",
-            ";".join(fast_chains),
-            "-map",
-            "[vout]",
-            "-map",
-            "0:a?",
-            "-af",
-            f"aresample=48000,volume=1.06,afade=t=in:st=0:d=0.08,afade=t=out:st={max(0.0, clip_duration - 0.10):.3f}:d=0.10",
-            "-r",
-            "30",
-            "-threads",
-            "2",
-            "-c:v",
-            "libx264",
-            "-profile:v",
-            "high",
-            "-preset",
-            "ultrafast",
-            "-crf",
-            "24",
-            "-maxrate",
-            "2200k",
-            "-bufsize",
-            "4400k",
-            "-pix_fmt",
-            "yuv420p",
-            "-c:a",
-            "aac",
-            "-ar",
-            "48000",
-            "-b:a",
-            "128k",
-            "-movflags",
-            "+faststart",
-            str(main_output.name),
-        ]
-        proc_fast = subprocess.run(fast_cmd, cwd=input_video.parent, capture_output=True, text=True)
-        if proc_fast.returncode != 0:
-            raise RuntimeError(f"ffmpeg fallo en modo review rapido:\n{(proc_fast.stderr or '')[-1800:]}")
-        finalize_clip_with_outro(ffmpeg_bin, main_output, output_video, branded_outro, fast_render=True)
-        return
-
-    intro_transition = (
-        "[vpre]scale="
-        "w='if(lt(t,0.70),1080*(1.08-0.08*t/0.70),1080)':"
-        "h='if(lt(t,0.70),1920*(1.08-0.08*t/0.70),1920)':"
-        "eval=frame,crop=1080:1920[vzoom]"
-    )
     base_comp = (
         "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,"
         "crop=1080:1920,boxblur=22:12[bg];"
         "[0:v]scale=1080:1920:force_original_aspect_ratio=decrease,"
         "setsar=1,eq=contrast=1.05:saturation=1.10[fg];"
-        "[bg][fg]overlay=(W-w)/2:(H-h)/2[vpre]"
+        "[bg][fg]overlay=(W-w)/2:(H-h)/2[vbase]"
     )
     chains = [base_comp]
-    chains.append(intro_transition)
-    current_label = "[vzoom]"
+    current_label = "[vbase]"
     if subtitle_ass and subtitle_ass.exists():
         chains.append(f"{current_label}ass='{ass_filter_path(subtitle_ass)}'[vsub]")
         current_label = "[vsub]"
@@ -1575,31 +1064,23 @@ def render_short(
         "128k",
         "-movflags",
         "+faststart",
-        str(main_output.name),
+        str(output_video.name),
     ]
 
     proc = subprocess.run(cmd, cwd=input_video.parent, capture_output=True, text=True)
     if proc.returncode == 0:
-        finalize_clip_with_outro(ffmpeg_bin, main_output, output_video, branded_outro, fast_render=False)
         return
 
     # Fallback for constrained hosts (Railway-like): lower resolution + lighter encode.
     fb_fade_out_start = max(0.0, clip_duration - 0.16)
-    fallback_intro = (
-        "[vpre]scale="
-        "w='if(lt(t,0.60),720*(1.07-0.07*t/0.60),720)':"
-        "h='if(lt(t,0.60),1280*(1.07-0.07*t/0.60),1280)':"
-        "eval=frame,crop=720:1280[vzoom]"
-    )
     fallback_comp = (
         "[0:v]scale=720:1280:force_original_aspect_ratio=increase,"
         "crop=720:1280,boxblur=18:10[bg];"
         "[0:v]scale=720:1280:force_original_aspect_ratio=decrease,setsar=1[fg];"
-        "[bg][fg]overlay=(W-w)/2:(H-h)/2[vpre]"
+        "[bg][fg]overlay=(W-w)/2:(H-h)/2[vbase]"
     )
     fallback_chains = [fallback_comp]
-    fallback_chains.append(fallback_intro)
-    fallback_label = "[vzoom]"
+    fallback_label = "[vbase]"
     if subtitle_ass and subtitle_ass.exists():
         fallback_chains.append(f"{fallback_label}ass='{ass_filter_path(subtitle_ass)}'[vsub]")
         fallback_label = "[vsub]"
@@ -1652,20 +1133,15 @@ def render_short(
         "128k",
         "-movflags",
         "+faststart",
-        str(main_output.name),
+        str(output_video.name),
     ]
     proc_fb = subprocess.run(fallback_cmd, cwd=input_video.parent, capture_output=True, text=True)
     if proc_fb.returncode != 0:
-        try:
-            main_output.unlink(missing_ok=True)
-        except Exception:
-            pass
         raise RuntimeError(
             "ffmpeg fallo (modo normal + fallback):\n"
             f"-- normal rc={proc.returncode} --\n{(proc.stderr or '')[-1800:]}\n"
             f"-- fallback rc={proc_fb.returncode} --\n{(proc_fb.stderr or '')[-1800:]}"
         )
-    finalize_clip_with_outro(ffmpeg_bin, main_output, output_video, branded_outro, fast_render=True)
 
 
 def upload_to_tiktok_playwright(
