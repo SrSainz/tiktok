@@ -19,7 +19,6 @@ import os
 import re
 import subprocess
 import sys
-import tempfile
 import time
 import unicodedata
 from dataclasses import dataclass
@@ -117,28 +116,6 @@ CAPTION_NOISE_LABELS = {
 
 CAPTION_KEEP_SHORT_WORDS = {"o", "u", "y", "vs", "no", "si"}
 
-TRANSCRIBE_WITH_FASTER_WHISPER = os.getenv("TRANSCRIBE_WITH_FASTER_WHISPER", "1").strip().lower() not in {
-    "0",
-    "false",
-    "no",
-    "off",
-}
-TRANSCRIBE_IF_CAPTIONS_WEAK = os.getenv("TRANSCRIBE_IF_CAPTIONS_WEAK", "0").strip().lower() not in {
-    "0",
-    "false",
-    "no",
-    "off",
-}
-TRANSCRIBE_PREFER_WHISPER = os.getenv("TRANSCRIBE_PREFER_WHISPER", "0").strip().lower() not in {
-    "0",
-    "false",
-    "no",
-    "off",
-}
-WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "small").strip() or "small"
-WHISPER_COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "int8").strip() or "int8"
-WHISPER_MAX_SECONDS = max(120, int(os.getenv("WHISPER_MAX_SECONDS", "1500").strip() or "1500"))
-
 
 @dataclass
 class VideoCandidate:
@@ -172,9 +149,6 @@ class SegmentChoice:
 
 def log(message: str) -> None:
     print(f"[pipeline] {message}")
-
-
-_WHISPER_MODEL_CACHE = None
 
 
 def _cookiefile_from_env() -> Optional[str]:
@@ -471,158 +445,6 @@ def parse_vtt(path: Path) -> List[CaptionCue]:
     return cues
 
 
-def caption_coverage_ratio(cues: List[CaptionCue], source_duration: Optional[float]) -> float:
-    if not cues or not source_duration or source_duration <= 0:
-        return 0.0
-    covered = 0.0
-    for cue in cues:
-        covered += max(0.0, float(cue.end) - float(cue.start))
-    return min(1.0, covered / max(1.0, float(source_duration)))
-
-
-def captions_look_weak(cues: List[CaptionCue], source_duration: Optional[float]) -> bool:
-    if not cues:
-        return True
-    cleaned = [clean_caption_text(cue.text) for cue in cues]
-    meaningful = [text for text in cleaned if text]
-    if len(meaningful) < 8:
-        return True
-    coverage = caption_coverage_ratio(cues, source_duration)
-    if source_duration and source_duration >= 240 and coverage < 0.12:
-        return True
-    avg_words = sum(len(_tokenize_caption_words(text)) for text in meaningful) / max(1, len(meaningful))
-    if avg_words < 2.2:
-        return True
-    unique_ratio = len({text.lower() for text in meaningful}) / max(1, len(meaningful))
-    if unique_ratio < 0.45:
-        return True
-    return False
-
-
-def _get_whisper_model():
-    global _WHISPER_MODEL_CACHE
-    if _WHISPER_MODEL_CACHE is not None:
-        return _WHISPER_MODEL_CACHE
-    from faster_whisper import WhisperModel  # type: ignore
-
-    _WHISPER_MODEL_CACHE = WhisperModel(WHISPER_MODEL_SIZE, device="cpu", compute_type=WHISPER_COMPUTE_TYPE)
-    return _WHISPER_MODEL_CACHE
-
-
-def transcribe_with_faster_whisper(
-    ffmpeg_bin: str,
-    source_video: Path,
-    *,
-    language: str = "es",
-    max_seconds: Optional[int] = None,
-    start_seconds: float = 0.0,
-) -> List[CaptionCue]:
-    if not TRANSCRIBE_WITH_FASTER_WHISPER:
-        return []
-
-    capped_seconds = None
-    if max_seconds is not None:
-        capped_seconds = max(30, min(int(max_seconds), WHISPER_MAX_SECONDS))
-
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_audio:
-        tmp_path = Path(tmp_audio.name)
-
-    cmd = [
-        ffmpeg_bin,
-        "-y",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-    ]
-    if start_seconds > 0:
-        cmd.extend(["-ss", f"{max(0.0, float(start_seconds)):.3f}"])
-    cmd.extend([
-        "-i",
-        str(source_video),
-    ])
-    if capped_seconds is not None:
-        cmd.extend(["-t", str(capped_seconds)])
-    cmd.extend(["-vn", "-ac", "1", "-ar", "16000", str(tmp_path)])
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    if proc.returncode != 0:
-        tmp_path.unlink(missing_ok=True)
-        raise RuntimeError(f"No se pudo extraer audio para Whisper: {(proc.stderr or '')[-800:]}")
-
-    try:
-        model = _get_whisper_model()
-        segments, _info = model.transcribe(
-            str(tmp_path),
-            language=(language or "es"),
-            vad_filter=True,
-            beam_size=1,
-            word_timestamps=False,
-        )
-        cues: List[CaptionCue] = []
-        offset = max(0.0, float(start_seconds))
-        for seg in segments:
-            text = normalize_text(getattr(seg, "text", "") or "")
-            if not text:
-                continue
-            cues.append(
-                CaptionCue(
-                    start=offset + float(getattr(seg, "start", 0.0) or 0.0),
-                    end=offset + float(getattr(seg, "end", 0.0) or 0.0),
-                    text=text,
-                )
-            )
-        return cues
-    finally:
-        tmp_path.unlink(missing_ok=True)
-
-
-def load_best_caption_cues(
-    ffmpeg_bin: str,
-    source_video: Path,
-    subtitle_file: Optional[Path],
-    *,
-    language: str,
-    source_duration: Optional[float],
-    log_fn=log,
-) -> tuple[List[CaptionCue], str]:
-    parsed_cues: List[CaptionCue] = []
-    if subtitle_file and subtitle_file.exists() and subtitle_file.suffix.lower() == ".vtt":
-        parsed_cues = parse_vtt(subtitle_file)
-        log_fn(f"Subtitulos encontrados: {subtitle_file.name}")
-    else:
-        log_fn("No hay subtitulos VTT disponibles.")
-
-    prefer_whisper = (
-        TRANSCRIBE_WITH_FASTER_WHISPER
-        and TRANSCRIBE_PREFER_WHISPER
-        and (source_duration is None or source_duration <= WHISPER_MAX_SECONDS)
-    )
-    should_transcribe = TRANSCRIBE_WITH_FASTER_WHISPER and (
-        prefer_whisper
-        or not parsed_cues
-        or (TRANSCRIBE_IF_CAPTIONS_WEAK and captions_look_weak(parsed_cues, source_duration))
-    )
-
-    if should_transcribe:
-        try:
-            max_seconds = int(source_duration) if source_duration else WHISPER_MAX_SECONDS
-            if prefer_whisper:
-                log_fn("Generando transcripcion propia con Whisper como fuente principal de subtitulos.")
-            else:
-                log_fn("Generando transcripcion propia con Whisper por calidad de captions.")
-            whisper_cues = transcribe_with_faster_whisper(
-                ffmpeg_bin,
-                source_video,
-                language=language,
-                max_seconds=max_seconds,
-            )
-            if whisper_cues:
-                return whisper_cues, "faster_whisper"
-        except Exception as exc:
-            log_fn(f"Whisper no estuvo disponible o fallo; sigo con captions existentes. ({exc})")
-
-    return parsed_cues, "youtube_vtt" if parsed_cues else "none"
-
-
 def pick_hook(cues: Iterable[CaptionCue]) -> str:
     best_text = ""
     best_score = -1
@@ -731,8 +553,7 @@ def clean_caption_text(text: str) -> str:
         prev = low
     filtered = _compress_repeated_token_windows(filtered)
     filtered = _trim_caption_tokens(filtered)
-    if len(filtered) > 12:
-        filtered = filtered[:12]
+    filtered = _select_best_caption_window(filtered, max_words=8)
     if _looks_broken_caption(filtered):
         return ""
     if _is_low_value_caption(filtered):
@@ -777,17 +598,9 @@ def chunk_caption_words(text: str, cue_duration: float) -> List[str]:
     if _is_low_value_caption(words):
         return []
 
-    if cue_duration <= 1.8 or len(words) <= 6:
-        return [wrap_caption_lines(words, max_line_chars=24, max_lines=2)]
-
-    if cue_duration <= 3.2:
-        target_words = 6
-    elif cue_duration <= 4.8:
-        target_words = 8
-    else:
-        target_words = 10
-
-    chunk_count = min(2, max(1, math.ceil(len(words) / target_words)))
+    max_chunks_by_time = max(1, int(cue_duration / 0.55))
+    chunk_count_by_words = max(1, math.ceil(len(words) / 3))
+    chunk_count = min(max_chunks_by_time, chunk_count_by_words, 4, len(words))
     words_per_chunk = max(1, math.ceil(len(words) / chunk_count))
 
     chunks: List[str] = []
@@ -798,7 +611,7 @@ def chunk_caption_words(text: str, cue_duration: float) -> List[str]:
             continue
         if _looks_broken_caption(chunk_words):
             continue
-        chunk_text = wrap_caption_lines(chunk_words, max_line_chars=24, max_lines=2)
+        chunk_text = wrap_caption_lines(chunk_words, max_line_chars=18, max_lines=2).upper()
         if chunk_text:
             chunks.append(chunk_text)
     return chunks
@@ -971,7 +784,33 @@ def build_hook_ass_markup(hook_text: str) -> str:
 
 
 def build_caption_ass_markup(chunk: str) -> str:
-    return ass_escape(chunk)
+    parts = [part for part in chunk.split(r"\N") if part]
+    if not parts:
+        return ass_escape(chunk)
+
+    rendered_lines: List[str] = []
+    highlight_used = False
+    for part in parts:
+        words = part.split()
+        if not words:
+            continue
+        highlight_index = 0
+        for idx, word in enumerate(words):
+            raw = re.sub(r"[^A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9]", "", word, flags=re.UNICODE)
+            if raw and (any(ch.isdigit() for ch in raw) or raw.upper() not in HOOK_STOPWORDS):
+                highlight_index = idx
+                break
+        highlighted: List[str] = []
+        for idx, word in enumerate(words):
+            escaped = ass_escape(word)
+            if not highlight_used and idx == highlight_index:
+                highlighted.append(r"{\1c&H0034FF3C&}" + escaped + r"{\r}")
+                highlight_used = True
+            else:
+                highlighted.append(escaped)
+        rendered_lines.append(" ".join(highlighted))
+
+    return r"\N".join(rendered_lines) if rendered_lines else ass_escape(chunk)
 
 
 def chunks_too_similar(a: str, b: str) -> bool:
@@ -1077,8 +916,8 @@ def write_segment_ass(cues: List[CaptionCue], start: float, end: float, out_path
             "Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,"
             "Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,"
             "MarginR,MarginV,Encoding",
-            "Style: Hook,Arial,66,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,4,0,8,92,92,208,1",
-            "Style: Cap,Arial,56,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,3,0,2,96,96,220,1",
+            "Style: Hook,Arial,70,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,4,0,8,92,92,228,1",
+            "Style: Cap,Arial,60,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,4,0,2,88,88,520,1",
             "",
             "[Events]",
             "Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text",
@@ -1573,29 +1412,34 @@ def render_short(
     fade_out_start = max(0.0, clip_duration - 0.16)
     if fast_render:
         fast_fade_out_start = max(0.0, clip_duration - 0.14)
+        fast_intro = (
+            "[vpre]scale="
+            "w='if(lt(t,0.45),720*(1.04-0.04*t/0.45),720)':"
+            "h='if(lt(t,0.45),1280*(1.04-0.04*t/0.45),1280)':"
+            "eval=frame,crop=720:1280[vzoom]"
+        )
         fast_comp = (
             "[0:v]scale=720:1280:force_original_aspect_ratio=increase,"
-            "crop=720:1280,boxblur=18:10[bg];"
+            "crop=720:1280,boxblur=12:6[bg];"
             "[0:v]scale=720:1280:force_original_aspect_ratio=decrease,"
-            "setsar=1,eq=contrast=1.05:saturation=1.10[fg];"
-            "[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1[vbase]"
+            "setsar=1[fg];"
+            "[bg][fg]overlay=(W-w)/2:(H-h)/2[vpre]"
         )
-        fast_chains = [fast_comp]
-        fast_label = "[vbase]"
+        fast_chains = [fast_comp, fast_intro]
+        fast_label = "[vzoom]"
         if subtitle_ass and subtitle_ass.exists():
-            fast_chains.append(f"{fast_label}ass='{ass_filter_path(subtitle_ass)}',setsar=1[vsub]")
+            fast_chains.append(f"{fast_label}ass='{ass_filter_path(subtitle_ass)}'[vsub]")
             fast_label = "[vsub]"
         if include_hook_overlay and hook_text.strip():
             fast_chains.append(
                 f"{fast_label}drawbox=x=40:y=92:w=640:h=120:color=black@0.24:t=fill,"
                 "drawtext="
                 f"font=Arial:text='{escape_drawtext(hook_text)}':"
-                "x=(w-text_w)/2:y=128:fontsize=34:fontcolor=white:borderw=2:bordercolor=black,"
-                "setsar=1[vhook]"
+                "x=(w-text_w)/2:y=128:fontsize=34:fontcolor=white:borderw=2:bordercolor=black[vhook]"
             )
             fast_label = "[vhook]"
         fast_chains.append(
-            f"{fast_label}setsar=1,fade=t=in:st=0:d=0.14,fade=t=out:st={fast_fade_out_start:.3f}:d=0.14[vout]"
+            f"{fast_label}fade=t=in:st=0:d=0.14,fade=t=out:st={fast_fade_out_start:.3f}:d=0.14[vout]"
         )
         fast_cmd = [
             ffmpeg_bin,
@@ -1651,29 +1495,35 @@ def render_short(
         finalize_clip_with_outro(ffmpeg_bin, main_output, output_video, branded_outro, fast_render=True)
         return
 
+    intro_transition = (
+        "[vpre]scale="
+        "w='if(lt(t,0.70),1080*(1.08-0.08*t/0.70),1080)':"
+        "h='if(lt(t,0.70),1920*(1.08-0.08*t/0.70),1920)':"
+        "eval=frame,crop=1080:1920[vzoom]"
+    )
     base_comp = (
         "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,"
         "crop=1080:1920,boxblur=22:12[bg];"
         "[0:v]scale=1080:1920:force_original_aspect_ratio=decrease,"
         "setsar=1,eq=contrast=1.05:saturation=1.10[fg];"
-        "[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1[vbase]"
+        "[bg][fg]overlay=(W-w)/2:(H-h)/2[vpre]"
     )
     chains = [base_comp]
-    current_label = "[vbase]"
+    chains.append(intro_transition)
+    current_label = "[vzoom]"
     if subtitle_ass and subtitle_ass.exists():
-        chains.append(f"{current_label}ass='{ass_filter_path(subtitle_ass)}',setsar=1[vsub]")
+        chains.append(f"{current_label}ass='{ass_filter_path(subtitle_ass)}'[vsub]")
         current_label = "[vsub]"
     if include_hook_overlay and hook_text.strip():
         chains.append(
             f"{current_label}drawbox=x=60:y=120:w=960:h=170:color=black@0.28:t=fill,"
             "drawtext="
             f"font=Arial:text='{escape_drawtext(hook_text)}':"
-            "x=(w-text_w)/2:y=165:fontsize=52:fontcolor=white:borderw=2:bordercolor=black,"
-            "setsar=1[vhook]"
+            "x=(w-text_w)/2:y=165:fontsize=52:fontcolor=white:borderw=2:bordercolor=black[vhook]"
         )
         current_label = "[vhook]"
     chains.append(
-        f"{current_label}setsar=1,fade=t=in:st=0:d=0.18,fade=t=out:st={fade_out_start:.3f}:d=0.16[vout]"
+        f"{current_label}fade=t=in:st=0:d=0.18,fade=t=out:st={fade_out_start:.3f}:d=0.16[vout]"
     )
     output_map = "[vout]"
 
@@ -1735,19 +1585,26 @@ def render_short(
 
     # Fallback for constrained hosts (Railway-like): lower resolution + lighter encode.
     fb_fade_out_start = max(0.0, clip_duration - 0.16)
+    fallback_intro = (
+        "[vpre]scale="
+        "w='if(lt(t,0.60),720*(1.07-0.07*t/0.60),720)':"
+        "h='if(lt(t,0.60),1280*(1.07-0.07*t/0.60),1280)':"
+        "eval=frame,crop=720:1280[vzoom]"
+    )
     fallback_comp = (
         "[0:v]scale=720:1280:force_original_aspect_ratio=increase,"
         "crop=720:1280,boxblur=18:10[bg];"
         "[0:v]scale=720:1280:force_original_aspect_ratio=decrease,setsar=1[fg];"
-        "[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1[vbase]"
+        "[bg][fg]overlay=(W-w)/2:(H-h)/2[vpre]"
     )
     fallback_chains = [fallback_comp]
-    fallback_label = "[vbase]"
+    fallback_chains.append(fallback_intro)
+    fallback_label = "[vzoom]"
     if subtitle_ass and subtitle_ass.exists():
-        fallback_chains.append(f"{fallback_label}ass='{ass_filter_path(subtitle_ass)}',setsar=1[vsub]")
+        fallback_chains.append(f"{fallback_label}ass='{ass_filter_path(subtitle_ass)}'[vsub]")
         fallback_label = "[vsub]"
     fallback_chains.append(
-        f"{fallback_label}setsar=1,fade=t=in:st=0:d=0.18,fade=t=out:st={fb_fade_out_start:.3f}:d=0.16[v]"
+        f"{fallback_label}fade=t=in:st=0:d=0.18,fade=t=out:st={fb_fade_out_start:.3f}:d=0.16[v]"
     )
     fallback_cmd = [
         ffmpeg_bin,
@@ -1904,43 +1761,26 @@ def run(args: argparse.Namespace) -> int:
     log(f"Descargando fuente: {selected.url}")
     source_video, subtitle_file, info = download_source_video(selected, job_dir=job_dir, language=args.language)
 
-    source_duration = info.get("duration") or selected.duration
-    cues, cue_source = load_best_caption_cues(
-        ffmpeg_bin,
-        source_video,
-        subtitle_file,
-        language=args.language,
-        source_duration=float(source_duration) if source_duration else None,
-        log_fn=log,
-    )
-    if cue_source == "none":
-        log("No hay subtitulos utilizables; se renderiza sin subtitulos.")
+    cues: List[CaptionCue] = []
+    if subtitle_file and subtitle_file.exists() and subtitle_file.suffix.lower() == ".vtt":
+        log(f"Subtitulos detectados: {subtitle_file.name}")
+        cues = parse_vtt(subtitle_file)
     else:
-        log(f"Fuente de subtitulos usada: {cue_source}")
+        log("No hay subtitulos VTT disponibles; se renderiza sin subtitulos.")
 
+    source_duration = info.get("duration") or selected.duration
     segment = choose_segment(cues, source_duration=source_duration, target_duration=args.duration)
-    render_cues = cues
 
     file_slug = slugify(selected.title, max_len=60)
     output_file = output_dir / f"{file_slug}_tiktok.mp4"
     hook_text = segment.hook
     log(f"Renderizando short ({segment.start:.1f}s -> {segment.end:.1f}s)...")
-    subtitle_ass = job_dir / "clip.ass"
-    if render_cues:
-        try:
-            if not write_segment_ass(render_cues, segment.start, segment.end, subtitle_ass, hook_text=hook_text):
-                subtitle_ass = None
-        except Exception:
-            subtitle_ass = None
-    else:
-        subtitle_ass = None
     render_short(
         ffmpeg_bin=ffmpeg_bin,
         input_video=source_video,
         output_video=job_dir / output_file.name,
         segment=segment,
         hook_text=hook_text,
-        subtitle_ass=subtitle_ass,
     )
 
     (job_dir / output_file.name).replace(output_file)

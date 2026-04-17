@@ -36,7 +36,7 @@ from youtube_tiktok_pipeline import (
     is_within_last_days,
     discover_from_channels,
     discover_from_search,
-    load_best_caption_cues,
+    parse_vtt,
     pick_hook,
     render_short,
     score_text,
@@ -2672,18 +2672,12 @@ def generate_dashboard(config: DashboardConfig, log_fn: Callable[[str], None] = 
     source_duration = float(info.get("duration") or 0.0)
     source_slug = slugify(source_title, max_len=55)
 
-    cues, cue_source = load_best_caption_cues(
-        ffmpeg_bin,
-        source_video,
-        subtitle_file,
-        language=config.language,
-        source_duration=source_duration,
-        log_fn=log_fn,
-    )
-    if cue_source == "none":
-        log_fn("No hay subtitulos utilizables: opciones se repartiran por duracion.")
+    cues: List[CaptionCue] = []
+    if subtitle_file and subtitle_file.exists() and subtitle_file.suffix.lower() == ".vtt":
+        cues = parse_vtt(subtitle_file)
+        log_fn(f"Subtitulos encontrados: {subtitle_file.name}")
     else:
-        log_fn(f"Fuente de subtitulos usada: {cue_source}")
+        log_fn("No hay subtitulos: opciones se repartiran por duracion.")
 
     if source_duration <= 0:
         raise RuntimeError("No se pudo detectar duracion del video.")
@@ -2743,8 +2737,7 @@ def generate_dashboard(config: DashboardConfig, log_fn: Callable[[str], None] = 
         subtitle_ass = job_dir / f"option_{idx:02}.ass"
         if cues:
             try:
-                render_cues = cues
-                if not write_segment_ass(render_cues, seg.start, seg.end, subtitle_ass, hook_text=overlay_hook_text):
+                if not write_segment_ass(cues, seg.start, seg.end, subtitle_ass, hook_text=overlay_hook_text):
                     subtitle_ass = None
             except Exception:
                 subtitle_ass = None
