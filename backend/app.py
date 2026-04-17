@@ -1193,6 +1193,14 @@ def _send_option_to_telegram(
     video_path = Path(str(option.get("manual_upload_file") or "")).resolve()
     if not video_path.exists() or not video_path.is_file():
         raise HTTPException(status_code=404, detail="video_file_not_found")
+    poster_path = Path(str(option.get("poster_file") or "")).resolve()
+    if not poster_path.exists():
+        candidate = video_path.with_suffix(".jpg")
+        if candidate.exists():
+            poster_path = candidate
+        else:
+            alt = video_path.parent / str(option.get("poster_file") or "")
+            poster_path = alt.resolve() if alt.exists() else Path()
 
     caption = _build_telegram_caption(job, option, result)
     data: dict[str, Any] = {
@@ -1207,12 +1215,19 @@ def _send_option_to_telegram(
     try:
         unique_name = f"{video_path.stem}_{job.get('id', 'job')[:8]}_{str(option.get('id') or 'opt').replace('/', '_')}.mp4"
         with video_path.open("rb") as fh:
+            files = {"video": (unique_name, fh, "video/mp4")}
+            thumb_handle = None
+            if poster_path and poster_path.exists() and poster_path.is_file():
+                thumb_handle = poster_path.open("rb")
+                files["thumbnail"] = (poster_path.name, thumb_handle, "image/jpeg")
             body = _telegram_call(
                 "sendVideo",
                 data=data,
-                files={"video": (unique_name, fh, "video/mp4")},
+                files=files,
                 timeout=240,
             )
+            if thumb_handle:
+                thumb_handle.close()
         result_obj = body.get("result") or {}
         return {
             "ok": True,
@@ -1257,6 +1272,14 @@ def _send_tiktok_review_to_telegram(
     video_path = Path(str(option.get("manual_upload_file") or "")).resolve()
     if not video_path.exists() or not video_path.is_file():
         raise HTTPException(status_code=404, detail="video_file_not_found")
+    poster_path = Path(str(option.get("poster_file") or "")).resolve()
+    if not poster_path.exists():
+        candidate = video_path.with_suffix(".jpg")
+        if candidate.exists():
+            poster_path = candidate
+        else:
+            alt = video_path.parent / str(option.get("poster_file") or "")
+            poster_path = alt.resolve() if alt.exists() else Path()
 
     caption = _build_telegram_review_caption(job, option, result)
     data: dict[str, Any] = {
@@ -1273,12 +1296,19 @@ def _send_tiktok_review_to_telegram(
     try:
         unique_name = f"{video_path.stem}_{request_id[:8]}.mp4"
         with video_path.open("rb") as fh:
+            files = {"video": (unique_name, fh, "video/mp4")}
+            thumb_handle = None
+            if poster_path and poster_path.exists() and poster_path.is_file():
+                thumb_handle = poster_path.open("rb")
+                files["thumbnail"] = (poster_path.name, thumb_handle, "image/jpeg")
             body = _telegram_call(
                 "sendVideo",
                 data=data,
-                files={"video": (unique_name, fh, "video/mp4")},
+                files=files,
                 timeout=240,
             )
+            if thumb_handle:
+                thumb_handle.close()
         result_obj = body.get("result") or {}
         return {
             "ok": True,

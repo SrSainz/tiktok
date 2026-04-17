@@ -1719,7 +1719,7 @@ def pick_non_overlapping(pool: List[CandidateSegment], max_options: int, overlap
     return selected
 
 
-def extract_poster_frame(ffmpeg_bin: str, input_video: Path, output_image: Path, at_second: float = 0.8) -> None:
+def extract_poster_frame(ffmpeg_bin: str, input_video: Path, output_image: Path, at_second: float = 2.0) -> None:
     cmd = [
         ffmpeg_bin,
         "-y",
@@ -1740,7 +1740,7 @@ def extract_poster_frame(ffmpeg_bin: str, input_video: Path, output_image: Path,
     if proc.returncode == 0 and output_image.exists():
         return
     fallback_cmd = cmd.copy()
-    fallback_cmd[6] = "0.000"
+    fallback_cmd[6] = "0.600"
     proc_fb = subprocess.run(fallback_cmd, cwd=input_video.parent, capture_output=True, text=True)
     if proc_fb.returncode != 0 or not output_image.exists():
         raise RuntimeError((proc_fb.stderr or proc.stderr or "No se pudo generar poster.")[-1200:])

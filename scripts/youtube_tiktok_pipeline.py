@@ -554,7 +554,7 @@ def write_segment_ass(cues: List[CaptionCue], start: float, end: float, out_path
         hook_end = min(max(1.35, segment_duration * 0.24), 1.9, max(0.8, segment_duration - 0.2))
         events.append(
             "Dialogue: 0,"
-            f"{fmt_ass(0.08)},{fmt_ass(hook_end)},Hook,,0,0,0,,{hook_markup}"
+            f"{fmt_ass(0.00)},{fmt_ass(hook_end)},Hook,,0,0,0,,{hook_markup}"
         )
 
     for cue in cues:
@@ -1005,9 +1005,9 @@ def render_short(
     base_comp = (
         "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,"
         "crop=1080:1920,boxblur=22:12,"
-        "eq=brightness=0.08:contrast=1.10:saturation=1.18:gamma=1.06[bg];"
+        "eq=brightness=0.16:contrast=1.14:saturation=1.18:gamma=1.18[bg];"
         "[0:v]scale=1080:1920:force_original_aspect_ratio=decrease,"
-        "setsar=1,eq=contrast=1.05:saturation=1.10[fg];"
+        "setsar=1,eq=brightness=0.05:contrast=1.08:saturation=1.10:gamma=1.14[fg];"
         "[bg][fg]overlay=(W-w)/2:(H-h)/2[vbase]"
     )
     chains = [base_comp]
@@ -1024,7 +1024,7 @@ def render_short(
         )
         current_label = "[vhook]"
     chains.append(
-        f"{current_label}fade=t=in:st=0:d=0.18,fade=t=out:st={fade_out_start:.3f}:d=0.16[vout]"
+        f"{current_label}fade=t=in:st=0:d=0.06,fade=t=out:st={fade_out_start:.3f}:d=0.16[vout]"
     )
     output_map = "[vout]"
 
@@ -1047,7 +1047,7 @@ def render_short(
         "-map",
         "0:a?",
         "-af",
-        f"loudnorm=I=-16:TP=-1.5:LRA=11,afade=t=in:st=0:d=0.10,afade=t=out:st={max(0.0, clip_duration - 0.12):.3f}:d=0.12",
+        f"loudnorm=I=-16:TP=-1.5:LRA=11,afade=t=in:st=0:d=0.04,afade=t=out:st={max(0.0, clip_duration - 0.12):.3f}:d=0.12",
         "-r",
         "30",
         "-threads",
@@ -1088,8 +1088,9 @@ def render_short(
     fallback_comp = (
         "[0:v]scale=720:1280:force_original_aspect_ratio=increase,"
         "crop=720:1280,boxblur=18:10,"
-        "eq=brightness=0.08:contrast=1.08:saturation=1.15:gamma=1.05[bg];"
-        "[0:v]scale=720:1280:force_original_aspect_ratio=decrease,setsar=1[fg];"
+        "eq=brightness=0.14:contrast=1.12:saturation=1.15:gamma=1.12[bg];"
+        "[0:v]scale=720:1280:force_original_aspect_ratio=decrease,"
+        "setsar=1,eq=brightness=0.04:contrast=1.06:saturation=1.08:gamma=1.10[fg];"
         "[bg][fg]overlay=(W-w)/2:(H-h)/2[vbase]"
     )
     fallback_chains = [fallback_comp]
@@ -1098,7 +1099,7 @@ def render_short(
         fallback_chains.append(f"{fallback_label}ass='{ass_filter_path(subtitle_ass)}'[vsub]")
         fallback_label = "[vsub]"
     fallback_chains.append(
-        f"{fallback_label}fade=t=in:st=0:d=0.18,fade=t=out:st={fb_fade_out_start:.3f}:d=0.16[v]"
+        f"{fallback_label}fade=t=in:st=0:d=0.06,fade=t=out:st={fb_fade_out_start:.3f}:d=0.16[v]"
     )
     fallback_cmd = [
         ffmpeg_bin,
@@ -1119,7 +1120,7 @@ def render_short(
         "-map",
         "0:a?",
         "-af",
-        f"loudnorm=I=-16:TP=-1.5:LRA=11,afade=t=in:st=0:d=0.10,afade=t=out:st={max(0.0, clip_duration - 0.12):.3f}:d=0.12",
+        f"loudnorm=I=-16:TP=-1.5:LRA=11,afade=t=in:st=0:d=0.04,afade=t=out:st={max(0.0, clip_duration - 0.12):.3f}:d=0.12",
         "-r",
         "24",
         "-threads",
