@@ -466,6 +466,7 @@ class DashboardConfig:
     overlap_ratio: float = 0.40
     output_dir: str = "output"
     work_dir: str = "work"
+    fast_render: bool = False
 
 
 @dataclass
