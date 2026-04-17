@@ -18,23 +18,26 @@ import re
 import subprocess
 import sys
 from dataclasses import asdict, dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Callable, List
+from typing import Any, Callable, List
+from zoneinfo import ZoneInfo
 
 from youtube_tiktok_pipeline import (
     CaptionCue,
     SegmentChoice,
     VideoCandidate,
+    clean_caption_text,
     compute_views_per_day,
     discover_most_popular_es,
+    detect_subject_focus_x,
     download_source_video,
     enrich_candidates,
     extract_hook_focus_text,
     is_within_last_days,
     discover_from_channels,
     discover_from_search,
-    parse_vtt,
+    load_best_caption_cues,
     pick_hook,
     render_short,
     score_text,
@@ -43,17 +46,41 @@ from youtube_tiktok_pipeline import (
 )
 
 DEFAULT_CREATOR_CHANNELS = [
-    "https://www.youtube.com/@TheGrefg/videos",
-    "https://www.youtube.com/@AuronPlay/videos",
-    "https://www.youtube.com/@Ibai/videos",
     "https://www.youtube.com/@YoSoyPlex/videos",
+    "https://www.youtube.com/@nilojeda/videos",
+    "https://www.youtube.com/@hiclavero/videos",
+    "https://www.youtube.com/@pedrobuerbaum/videos",
+    "https://www.youtube.com/@ibaillanos/videos",
+    "https://www.youtube.com/@AuronPlay/videos",
+    "https://www.youtube.com/@illojuan_/videos",
+    "https://www.youtube.com/@TheGrefg/videos",
     "https://www.youtube.com/@elrubiusOMG/videos",
-    "https://www.youtube.com/@Dagar/videos",
-    "https://www.youtube.com/@Lyna/videos",
-    "https://www.youtube.com/@illojuan/videos",
-    "https://www.youtube.com/@JordiWild/videos",
+    "https://www.youtube.com/@willyrex/videos",
+    "https://www.youtube.com/@djmariio/videos",
+    "https://www.youtube.com/@xbuyer/videos",
     "https://www.youtube.com/@byViruZz/videos",
+    "https://www.youtube.com/@TheWildProject/videos",
 ]
+
+DEFAULT_CREATOR_SEARCH_QUERY = (
+    "YoSoyPlex Nil Ojeda Hiclavero Pedro Buerbaum Ibai AuronPlay illojuan "
+    "TheGrefg elrubiusOMG Willyrex DjMaRiiO xBuyer byViruZz Jordi Wild"
+)
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+USED_VIDEO_HISTORY_FILE = Path(
+    os.getenv("USED_VIDEO_HISTORY_FILE", str(REPO_ROOT / "data" / "used_videos.json"))
+).resolve()
+USED_VIDEO_COOLDOWN_HOURS = max(1, int(os.getenv("USED_VIDEO_COOLDOWN_HOURS", "72").strip() or "72"))
+USED_CREATOR_COOLDOWN_HOURS = max(1, int(os.getenv("USED_CREATOR_COOLDOWN_HOURS", "24").strip() or "24"))
+USED_VIDEO_HISTORY_LIMIT = max(50, int(os.getenv("USED_VIDEO_HISTORY_LIMIT", "500").strip() or "500"))
+PERFORMANCE_MEMORY_FILE = Path(
+    os.getenv("PERFORMANCE_MEMORY_FILE", str(REPO_ROOT / "data" / "performance_memory.json"))
+).resolve()
+PERFORMANCE_MEMORY_LIMIT = max(100, int(os.getenv("PERFORMANCE_MEMORY_LIMIT", "1000").strip() or "1000"))
+PERFORMANCE_MEMORY_DAYS = max(3, int(os.getenv("PERFORMANCE_MEMORY_DAYS", "30").strip() or "30"))
+USED_VIDEO_HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+PERFORMANCE_MEMORY_FILE.parent.mkdir(parents=True, exist_ok=True)
 
 DISCOVERY_MODES = {"viral_es", "creators_es"}
 
@@ -82,12 +109,16 @@ CREATOR_CHANNEL_BLOCKLIST = {
 CREATOR_TITLE_BLOCKLIST = {
     "official trailer",
     "trailer oficial",
-    "trÃ¡iler oficial",
+    "tráiler oficial",
     "teaser",
     "official mv",
     "video oficial",
     "official video",
     "lyric video",
+    "lyrics",
+    "letra",
+    "con letra",
+    "audio oficial",
     "banda sonora",
     "soundtrack",
     "episode",
@@ -176,8 +207,10 @@ class DashboardConfig:
     stride: int = 10
     max_pool: int = 50
     overlap_ratio: float = 0.40
+    fast_render: bool = False
     output_dir: str = "output"
     work_dir: str = "work"
+    slot_key: str = ""
 
 
 @dataclass
@@ -185,8 +218,10 @@ class DashboardResult:
     dashboard_dir: str
     dashboard_html: str
     manifest_path: str
+    work_job_dir: str
     source_title: str
     source_url: str
+    slot_key: str
     options: List[ClipOption]
 
 
@@ -217,30 +252,204 @@ AI_HOOK_TERMS = {
 }
 
 TOPIC_HASHTAG_RULES = [
-    (("minecraft", "creeper", "survival", "mod"), ["#minecraft", "#gaming", "#clipenespanol"]),
-    (("roblox",), ["#roblox", "#gaming", "#clipenespanol"]),
-    (("clash", "clash royale", "brawl", "brawl stars"), ["#gaming", "#mobilegaming", "#clipenespanol"]),
-    (("fortnite",), ["#fortnite", "#gaming", "#clipenespanol"]),
-    (("velada", "boxeo", "combate"), ["#boxeo", "#velada", "#clipenespanol"]),
-    (("entrevista", "podcast", "charla"), ["#podcast", "#clips", "#clipenespanol"]),
-    (("historia", "curiosidad", "dato"), ["#curiosidades", "#datos", "#clipenespanol"]),
+    (("mi vida", "ultimamente", "ultimos dias", "ultimas semanas", "update"), ["#vlog", "#storytime", "#update"]),
+    (("minecraft", "creeper", "survival", "mod"), ["#minecraft", "#gaming", "#survival"]),
+    (("roblox",), ["#roblox", "#gaming", "#juegos"]),
+    (("clash", "clash royale", "brawl", "brawl stars"), ["#gaming", "#mobilegaming", "#juegos"]),
+    (("fortnite",), ["#fortnite", "#gaming", "#juegos"]),
+    (("fifa", "fc 25", "fc25", "fut", "gol", "partidazo"), ["#futbol", "#gaming", "#fc25"]),
+    (("velada", "boxeo", "combate"), ["#boxeo", "#velada", "#combate"]),
+    (("entrevista", "podcast", "charla"), ["#podcast", "#clips", "#ideas"]),
+    (("psicologia", "vender", "ventas", "marketing"), ["#ventas", "#marketing", "#negocios"]),
+    (("historia", "curiosidad", "dato"), ["#curiosidades", "#datos", "#storytime"]),
+    (("viaje", "viaj", "hong kong", "china", "india", "japon", "tokio", "corea", "qatar"), ["#viajes", "#vlog", "#curiosidades"]),
+    (("hong kong",), ["#hongkong", "#viajes", "#curiosidades"]),
+    (("india",), ["#india", "#viajes", "#vlog"]),
+    (("mcdonald", "comida", "restaurante", "kebab", "pizza", "burger"), ["#comida", "#vlog", "#curiosidades"]),
+    (("coche", "regale", "suenos", "regalo"), ["#regalo", "#vlog", "#momentazo"]),
+    (("reto", "24 horas", "24h", "supervivencia"), ["#reto", "#viral", "#momentazo"]),
+    (("dinero", "negocio", "empresa", "millon", "millonario"), ["#dinero", "#negocios", "#mentalidad"]),
 ]
 
-
 SIGNAL_HASHTAG_RULES = {
-    "Pregunta": ["#pregunta", "#debate"],
-    "Dato": ["#dato", "#curiosidad"],
-    "Impacto": ["#momentazo", "#impactante"],
-    "Mucho texto": ["#storytime", "#clipenespanol"],
+    "Pregunta": ["#debate", "#opinion"],
+    "Dato": ["#curiosidades", "#datos"],
+    "Impacto": ["#momentazo", "#viral"],
+    "Mucho texto": ["#storytime"],
     "Audio alto": ["#reaccion", "#momentazo"],
-    "Audio estable": ["#clipenespanol"],
-    "Cambio escena": ["#momento", "#clipenespanol"],
-    "Ritmo visual": ["#satisfying", "#clipenespanol"],
-    "Buen audio": ["#audio", "#clipenespanol"],
-    "Momento claro": ["#clipenespanol"],
+    "Audio estable": [],
+    "Cambio escena": ["#momentazo"],
+    "Ritmo visual": [],
+    "Buen audio": [],
+    "Momento claro": [],
 }
 
-BASE_TIKTOK_HASHTAGS = ["#clipenespanol"]
+BASE_TIKTOK_HASHTAGS: list[str] = []
+
+THEME_REACTION_RULES = [
+    (("mi vida", "ultimamente", "últimamente", "estos dias", "estos días", "update"), "Es el típico resumen en el que te das cuenta de que le han pasado demasiadas cosas seguidas."),
+    (("mcdonald", "comida", "restaurante", "kebab", "pizza", "burger"), "No sé si me daría antojo o curiosidad ver esto en persona."),
+    (("viaje", "hong kong", "china", "india", "japon", "tokio", "corea"), "Es de esos vídeos que te hacen mirar dos veces cómo vive la gente allí."),
+    (("coche", "regale", "regalé", "sueños", "suenos"), "Es el tipo de regalo que se te va de las manos en el mejor sentido."),
+    (("reto", "24 horas", "24h", "supervivencia"), "Aquí se nota enseguida que la cosa va a ir escalando."),
+    (("entrevista", "podcast", "charla"), "Hay un momento de charla que te deja escuchando hasta el final."),
+    (("minecraft", "roblox", "fortnite", "clash", "brawl", "fifa", "fc25"), "Si juegas a esto, ya sabes que aquí venía drama del bueno."),
+    (("boxeo", "velada", "combate"), "Tiene pinta de momento para comentarlo entero con amigos."),
+    (("dinero", "negocio", "empresa", "millon", "millonario"), "Aquí hay un detalle que te hace replantearte la historia."),
+]
+
+CONTENT_VERTICAL_RULES = [
+    ("travel", ("hong kong", "china", "india", "qatar", "japon", "tokio", "corea", "viaje", "viajes", "callejera", "spa")),
+    ("food", ("comida", "restaurante", "kebab", "pizza", "burger", "mcdonald")),
+    ("podcast", ("podcast", "entrevista", "charla", "te contare", "te contar", "21 minutos", "wild project")),
+    ("business", ("psicologia", "vender", "ventas", "negocio", "empresa", "millon", "millonario", "mentalidad", "dinero")),
+    ("challenge", ("reto", "24 horas", "24h", "supervivencia", "aguanto", "desafio")),
+    ("prank", ("broma", "bromas", "calle", "regale", "regalo", "suenos")),
+    ("sports", ("partidazo", "gol", "futbol", "boxeo", "velada", "combate", "latam", "espana")),
+    ("gaming", ("minecraft", "roblox", "fortnite", "clash", "brawl", "fifa", "fc25", "mrbeast", "wipeout")),
+    ("vlog", ("mi vida", "ultimamente", "ultimos dias", "ultimas semanas", "update")),
+]
+
+VERTICAL_CAPTION_REACTIONS = {
+    "travel": "Lo mejor de estos videos es el detalle cotidiano que aqui se siente surrealista.",
+    "food": "Entre hambre y curiosidad, este tipo de clip siempre entra solo.",
+    "podcast": "La gracia de este corte es que deja una idea clara y otra para discutirla un rato.",
+    "business": "Tiene una idea util y otra bastante debatible, que es justo lo que engancha.",
+    "challenge": "Se nota rapido que la situacion se va a torcer mas de la cuenta.",
+    "prank": "La reaccion es medio caos y medio risa, que es lo que hace que funcione.",
+    "sports": "Tiene ese punto de tension que hace que quieras ver el remate hasta el final.",
+    "gaming": "Entra directo en la parte con mas pique y se entiende al vuelo aunque no hayas visto todo.",
+    "vlog": "Resume muy bien el video y tiene ese detalle que hace quedarte unos segundos mas.",
+    "generic": "Entra rapido, se entiende facil y deja algo para comentar.",
+}
+
+VERTICAL_SUMMARY_TAILS = {
+    "travel": "y hay un detalle que se te queda rondando",
+    "food": "y lo mejor es lo normal que lo cuentan",
+    "podcast": "y justo aqui esta la parte que mejor se queda",
+    "business": "y hay una idea aqui que entra rapido",
+    "challenge": "y en este tramo es donde empieza a liarse",
+    "prank": "y aqui esta la reaccion que mejor vende el momento",
+    "sports": "y en este tramo esta la parte mas comentable",
+    "gaming": "y aqui esta justo la parte que mas pica",
+    "vlog": "y este corte resume muy bien el video",
+    "generic": "y este corte es de lo mas facil de ver",
+}
+
+SOCIAL_BAD_EDGE_WORDS = {
+    "a",
+    "al",
+    "asi",
+    "bueno",
+    "claro",
+    "como",
+    "con",
+    "cuando",
+    "de",
+    "del",
+    "el",
+    "en",
+    "entonces",
+    "era",
+    "es",
+    "esta",
+    "estamos",
+    "esto",
+    "ha",
+    "hay",
+    "la",
+    "las",
+    "lo",
+    "los",
+    "me",
+    "mi",
+    "nada",
+    "no",
+    "o",
+    "osea",
+    "para",
+    "pero",
+    "pues",
+    "que",
+    "se",
+    "si",
+    "sin",
+    "un",
+    "una",
+    "vale",
+    "vamos",
+    "y",
+    "ya",
+    "yo",
+}
+
+SOCIAL_FILLER_WORDS = {
+    "ah",
+    "ahi",
+    "bueno",
+    "claro",
+    "eh",
+    "em",
+    "esto",
+    "literalmente",
+    "nada",
+    "osea",
+    "pues",
+    "rollo",
+    "sabes",
+    "tipo",
+    "vale",
+}
+
+SOCIAL_BAD_PHRASES = (
+    "estamos arropando",
+    "claro nunca",
+    "o sea",
+    "en plan",
+    "vamos a ver",
+    "yo que se",
+)
+
+PLANNER_SLOTS = [
+    {
+        "slot_key": "morning",
+        "label": "Mañana",
+        "publish_time": "09:30",
+        "strategy": "Clip muy claro, curioso y facil de consumir para la primera apertura fuerte del dia.",
+    },
+    {
+        "slot_key": "lunch",
+        "label": "Comida",
+        "publish_time": "13:30",
+        "strategy": "Clip facil de entender y con hook rapido para el primer pico del dia.",
+    },
+    {
+        "slot_key": "afternoon",
+        "label": "Tarde",
+        "publish_time": "18:30",
+        "strategy": "Momento con tension o dato claro para el tramo de salida del trabajo.",
+    },
+    {
+        "slot_key": "prime",
+        "label": "Prime",
+        "publish_time": "21:30",
+        "strategy": "La apuesta mas fuerte del dia: mayor alcance y mejor hook.",
+    },
+    {
+        "slot_key": "late",
+        "label": "Noche",
+        "publish_time": "23:00",
+        "strategy": "Ultimo disparo del dia: clip mas comentable o con giro.",
+    },
+]
+
+SLOT_COPY_RULES = {
+    "morning": "Para primera hora entra muy facil.",
+    "lunch": "Es de los que te ves entero en un minuto.",
+    "afternoon": "Tiene el punto justo para entrar a media tarde.",
+    "prime": "Este es de los que mejor aguantan hasta el final.",
+    "late": "Deja tema para comentarlo incluso al final del dia.",
+}
 
 
 def _safe_age_days(upload_date: str | None, today: date) -> int | None:
@@ -281,15 +490,15 @@ def _clean_social_text(value: str, *, allow_punctuation: bool = True) -> str:
     text = html.unescape(str(value or ""))
     text = (
         text.replace("â€¦", "...")
-        .replace("ˇ", " ")
-        .replace("ż", " ")
-        .replace("�", " ")
+        .replace("Ë‡", " ")
+        .replace("Å¼", " ")
+        .replace("ï¿½", " ")
     )
     text = re.sub(r"\[[^\]]+\]", " ", text)
     text = re.sub(r"\([^\)]*\)", " ", text)
     text = re.sub(r"https?://\S+", " ", text)
     if allow_punctuation:
-        text = re.sub(r"[^\w\s¿?¡!.,:;/'%+\-]", " ", text, flags=re.UNICODE)
+        text = re.sub(r"[^\w\s?!.,:;/'%+\-]", " ", text, flags=re.UNICODE)
     text = re.sub(r"\s+", " ", text).strip(" \t\r\n-_|:;,")
     if not allow_punctuation:
         text = re.sub(r"[^\w\s]", " ", text)
@@ -336,15 +545,24 @@ def _looks_noisy_title(text: str) -> bool:
     return False
 
 
+def _keyword_present(haystack: str, keyword: str) -> bool:
+    token = keyword.strip().lower()
+    if not token:
+        return False
+    if " " in token:
+        return token in haystack
+    return re.search(rf"\b{re.escape(token)}\b", haystack) is not None
+
+
 def _build_topic_hashtags(*texts: str, signal_tags: List[str] | None = None) -> List[str]:
     haystack = " ".join(
-        _clean_social_text(text, allow_punctuation=False).lower()
+        _clean_social_text(_strip_clip_prefix(text), allow_punctuation=False).lower()
         for text in texts
         if text
     ).strip()
     hashtags: List[str] = []
     for keywords, tags in TOPIC_HASHTAG_RULES:
-        if any(keyword in haystack for keyword in keywords):
+        if any(_keyword_present(haystack, keyword) for keyword in keywords):
             hashtags.extend(tags)
     for tag in signal_tags or []:
         hashtags.extend(SIGNAL_HASHTAG_RULES.get(tag, []))
@@ -389,20 +607,277 @@ def _channel_hashtag(source_channel: str) -> str:
     return slug.lower()
 
 
+def _detect_content_vertical(*texts: str) -> str:
+    haystack = " ".join(
+        _clean_social_text(_strip_clip_prefix(text), allow_punctuation=False).lower()
+        for text in texts
+        if text
+    ).strip()
+    for vertical, keywords in CONTENT_VERTICAL_RULES:
+        if any(_keyword_present(haystack, keyword) for keyword in keywords):
+            return vertical
+    return "generic"
+
+
 def _build_caption_cta(signal_tags: List[str], hook: str, why_it_may_work: str) -> str:
-    hook_clean = _strip_clip_prefix(hook)
-    why_clean = _strip_clip_prefix(why_it_may_work)
     if "Pregunta" in signal_tags:
-        return "¿Tú qué harías en esa situación?"
-    if "Dato" in signal_tags or re.search(r"\b\d+\b", hook_clean):
-        return "Lo fuerte llega en segundos."
-    if "Impacto" in signal_tags:
-        return "Tiene ese inicio que te obliga a seguir."
-    if why_clean:
-        why_clean = _truncate_copy(why_clean, 80)
-        if why_clean:
-            return why_clean[0].upper() + why_clean[1:]
-    return "Quédate hasta el giro final."
+        return "Tu aqui que habrias hecho?"
+    return ""
+
+
+def _build_caption_reaction(
+    *,
+    source_title: str,
+    hook: str,
+    short_description: str,
+    transcript_preview: str,
+    signal_tags: List[str],
+) -> str:
+    vertical = _detect_content_vertical(source_title, hook, short_description, transcript_preview)
+    base = VERTICAL_CAPTION_REACTIONS.get(vertical, VERTICAL_CAPTION_REACTIONS["generic"])
+    if vertical in {"travel", "food", "business", "podcast", "vlog"}:
+        if "Pregunta" in signal_tags and vertical in {"podcast", "business"}:
+            return "Es de esas ideas que te dejan pensando mas de la cuenta."
+        if "Dato" in signal_tags and vertical in {"travel", "food"}:
+            return "Lo mejor es el detalle que cuentan como si fuera lo mas normal del mundo."
+        return base
+    if "Impacto" in signal_tags and vertical in {"sports", "gaming", "challenge", "prank"}:
+        return "Se ve venir el momentazo y aun asi entra mejor de lo que esperas."
+    if "Pregunta" in signal_tags:
+        return "Tu aqui seguramente tambien te pararias a opinar."
+    if "Dato" in signal_tags:
+        return "Lo mejor es el detalle que sueltan casi sin avisar."
+    return base
+
+
+def _build_thematic_summary(
+    *,
+    title: str,
+    source_title: str,
+    short_description: str,
+) -> str:
+    vertical = _detect_content_vertical(title, source_title, short_description)
+    source_clean = _truncate_copy(_strip_clip_prefix(source_title), 90).rstrip(" .")
+    if source_clean and not _looks_fragmentary_social_lead(source_clean):
+        if _norm_text(source_clean) != _norm_text(title):
+            return _sentence_case(source_clean)
+        if len(_social_tokens(source_clean)) >= 4:
+            tail = VERTICAL_SUMMARY_TAILS.get(vertical, VERTICAL_SUMMARY_TAILS["generic"])
+            return _truncate_copy(f"{source_clean} {tail}", 96).rstrip(" .")
+
+    pieces = _extract_social_snippets(f"{title}. {short_description}. {source_title}")
+    for piece in pieces:
+        clean = _truncate_copy(_strip_clip_prefix(piece), 90).rstrip(" .")
+        if not clean or _looks_fragmentary_social_lead(clean):
+            continue
+        if _norm_text(clean) == _norm_text(title):
+            continue
+        if len(_social_tokens(clean)) < 3:
+            continue
+        return _sentence_case(clean)
+    return ""
+
+
+def _source_channel_line(source_channel: str, title: str) -> str:
+    channel = _clean_social_text(source_channel, allow_punctuation=False).strip()
+    if not channel:
+        return ""
+    norm_channel = _norm_text(channel)
+    norm_title = _norm_text(title)
+    if norm_channel and norm_channel in norm_title:
+        return ""
+    blocked = ("records", "official", "studios", "topic", "trailers", "pictures", "music")
+    if any(token in channel.lower() for token in blocked):
+        return ""
+    return f"Clip de {channel}."
+
+
+def _social_tokens(text: str) -> List[str]:
+    return re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9]+", _clean_social_text(text), flags=re.UNICODE)
+
+
+def _content_token_count(tokens: List[str]) -> int:
+    return sum(
+        1
+        for token in tokens
+        if any(ch.isdigit() for ch in token) or (len(token) > 2 and token.lower() not in SOCIAL_BAD_EDGE_WORDS)
+    )
+
+
+def _simple_spanish_stem(token: str) -> str:
+    base = token.lower()
+    for suffix in ("aciones", "acion", "mente", "amiento", "imientos", "imiento", "adora", "ador", "adoras", "adores"):
+        if base.endswith(suffix) and len(base) > len(suffix) + 2:
+            return base[: -len(suffix)]
+    for suffix in ("ando", "iendo", "ados", "adas", "ado", "ada", "idos", "idas", "ido", "ida", "amos", "emos", "imos", "ar", "er", "ir", "es", "as", "os", "a", "o"):
+        if base.endswith(suffix) and len(base) > len(suffix) + 2:
+            return base[: -len(suffix)]
+    return base
+
+
+def _has_repeated_root_pattern(tokens: List[str]) -> bool:
+    if len(tokens) < 3:
+        return False
+    connectors = {"no", "ni", "y", "o"}
+    for idx in range(len(tokens) - 2):
+        left = _simple_spanish_stem(tokens[idx])
+        middle = tokens[idx + 1].lower()
+        right = _simple_spanish_stem(tokens[idx + 2])
+        if middle in connectors and len(left) >= 5 and left == right:
+            return True
+    return False
+
+
+def _extract_social_snippets(text: str) -> List[str]:
+    clean = _strip_clip_prefix(text)
+    if not clean:
+        return []
+
+    snippets = [clean]
+    tokens = _social_tokens(clean)
+    if len(tokens) >= 6:
+        snippets.append(" ".join(tokens[:6]))
+    if len(tokens) >= 8:
+        snippets.append(" ".join(tokens[:8]))
+    for idx, token in enumerate(tokens):
+        low = token.lower()
+        if low == "o" or any(ch.isdigit() for ch in token):
+            start = max(0, idx - 3)
+            end = min(len(tokens), idx + 4)
+            compact = " ".join(tokens[start:end]).strip()
+            if len(compact) >= 8:
+                snippets.append(compact)
+    for chunk in re.split(r"[.!?…\n]+", clean):
+        part = chunk.strip(" ,;:-")
+        if len(part) >= 8:
+            snippets.append(part)
+    for chunk in re.split(r"\s+[—-]\s+|:\s+|;\s+|,\s+", clean):
+        part = chunk.strip(" ,;:-")
+        if len(part) >= 10:
+            snippets.append(part)
+    return _dedupe_keep_order(snippets)
+
+
+def _looks_fragmentary_social_lead(text: str) -> bool:
+    clean = _strip_clip_prefix(text)
+    if not clean or _looks_noisy_title(clean):
+        return True
+    lowered = clean.lower()
+    if any(phrase in lowered for phrase in SOCIAL_BAD_PHRASES):
+        return True
+    tokens = _social_tokens(clean)
+    if len(tokens) < 2:
+        return True
+    if _content_token_count(tokens) < 2:
+        return True
+    if _has_repeated_root_pattern(tokens):
+        return True
+    if tokens[0].lower() in SOCIAL_BAD_EDGE_WORDS:
+        return True
+    if len(tokens) >= 4 and tokens[-1].lower() in SOCIAL_BAD_EDGE_WORDS:
+        return True
+    if len(tokens) >= 4 and (sum(1 for token in tokens if len(token) <= 2) / len(tokens)) > 0.34:
+        return True
+    if re.search(r"\b(?:claro|bueno|pues|osea|o sea|nada|vale|literalmente)$", lowered):
+        return True
+    return False
+
+
+def _score_social_title_candidate(text: str, *, signal_tags: List[str], source_title: str) -> float:
+    clean = _strip_clip_prefix(text)
+    if not clean:
+        return -999.0
+    tokens = _social_tokens(clean)
+    if _looks_fragmentary_social_lead(clean):
+        return -200.0
+
+    score = 0.0
+    content_count = _content_token_count(tokens)
+    score += min(16.0, content_count * 3.0)
+
+    if "?" in clean:
+        score += 22.0
+    if re.search(r"\b\d+\b", clean):
+        score += 14.0
+    if re.search(r"\bo\b", clean, flags=re.IGNORECASE):
+        score += 8.0
+    if any(token.lower() in AI_HOOK_TERMS for token in tokens):
+        score += 8.0
+    if "Pregunta" in signal_tags and ("?" in clean or re.search(r"\bo\b", clean, flags=re.IGNORECASE)):
+        score += 8.0
+    if "Dato" in signal_tags and re.search(r"\b\d+\b", clean):
+        score += 8.0
+    if "Impacto" in signal_tags and any(term in clean.lower() for term in ("nunca", "brutal", "historia", "record", "reto")):
+        score += 6.0
+
+    length = len(clean)
+    if 16 <= length <= 52:
+        score += 12.0
+    elif 10 <= length <= 68:
+        score += 6.0
+    else:
+        score -= 8.0
+
+    token_count = len(tokens)
+    if 3 <= token_count <= 7:
+        score += 10.0
+    elif token_count <= 10:
+        score += 4.0
+    else:
+        score -= 6.0
+
+    if _norm_text(clean) == _norm_text(source_title):
+        score += 8.0
+    if clean.lower().startswith(("estamos", "claro", "bueno", "nada", "pues", "vale")):
+        score -= 10.0
+    if re.search(r"\b(tiene|incluye|entra|audio|ritmo|visual|senales|señales|detalle|resumen rapido)\b", clean.lower()):
+        score -= 10.0
+    return score
+
+
+def _select_social_title(
+    *,
+    source_title: str,
+    hook: str,
+    short_description: str,
+    why_it_may_work: str,
+    transcript_preview: str,
+    signal_tags: List[str],
+) -> str:
+    natural_source_title = _truncate_copy(_strip_clip_prefix(source_title or ""), 72).rstrip(" .")
+    if (
+        natural_source_title
+        and len(_social_tokens(natural_source_title)) >= 3
+        and not _looks_noisy_title(natural_source_title)
+        and _content_token_count(_social_tokens(natural_source_title)) >= 2
+    ):
+        return natural_source_title
+
+    focus_title = _strip_clip_prefix(extract_hook_focus_text(f"{short_description}. {transcript_preview}. {hook}"))
+    raw_candidates: List[str] = []
+    for text in (hook, focus_title, short_description, transcript_preview, why_it_may_work, source_title):
+        raw_candidates.extend(_extract_social_snippets(text))
+
+    scored: List[tuple[float, str]] = []
+    for candidate in _dedupe_keep_order(raw_candidates):
+        clean = _truncate_copy(_strip_clip_prefix(candidate), 72).rstrip(" .")
+        if not clean:
+            continue
+        scored.append(
+            (
+                _score_social_title_candidate(clean, signal_tags=signal_tags, source_title=source_title),
+                clean,
+            )
+        )
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+    if scored and scored[0][0] > -50:
+        return scored[0][1]
+
+    fallback = _truncate_copy(_strip_clip_prefix(short_description or source_title or hook or "Clip viral del dia"), 72).rstrip(" .")
+    if fallback and not _looks_fragmentary_social_lead(fallback):
+        return fallback
+    return _truncate_copy(_strip_clip_prefix(source_title or "Clip viral del dia"), 72).rstrip(" .")
 
 
 def build_tiktok_copy(
@@ -414,45 +889,59 @@ def build_tiktok_copy(
     why_it_may_work: str,
     transcript_preview: str,
     signal_tags: List[str],
+    slot_key: str = "",
 ) -> tuple[str, str, List[str]]:
-    clean_hook = _truncate_copy(_strip_clip_prefix(hook), 72)
-    focus_title = _truncate_copy(
-        _strip_clip_prefix(extract_hook_focus_text(f"{short_description}. {transcript_preview}. {hook}")),
-        48,
+    title = _select_social_title(
+        source_title=source_title,
+        hook=hook,
+        short_description=short_description,
+        why_it_may_work=why_it_may_work,
+        transcript_preview=transcript_preview,
+        signal_tags=signal_tags,
     )
-    lead_candidates = [
-        _truncate_copy(_strip_clip_prefix(short_description), 72),
-        _truncate_copy(_strip_clip_prefix(transcript_preview), 72),
-        _truncate_copy(_strip_clip_prefix(source_title), 72),
-    ]
-    if focus_title and len(focus_title) >= 8:
-        lead_candidates.insert(0, focus_title)
-    if clean_hook and not _looks_noisy_title(hook):
-        lead_candidates.insert(0, clean_hook)
-    title = next((candidate for candidate in lead_candidates if candidate and len(candidate) >= 12), "")
-    if not title:
-        title = _truncate_copy(_strip_clip_prefix(clean_hook or source_title or "Clip viral de la semana"), 72)
+    title = _sentence_case(_truncate_copy(title, 72)).rstrip(" .")
 
-    title = _sentence_case(title).rstrip(" .")
-    if title and title[-1] not in "!?" and (len(title.split()) > 3 or len(title) > 28):
-        title = f"{title}..."
+    source_title_clean = _truncate_copy(_strip_clip_prefix(source_title or ""), 72).rstrip(" .")
+    summary_line = ""
+    if len(_social_tokens(title)) < 4 or len(title) < 18:
+        summary_line = _build_thematic_summary(
+            title=title,
+            source_title=source_title,
+            short_description=short_description,
+        )
 
-    caption_parts = [title] if title else []
+    reaction_line = _build_caption_reaction(
+        source_title=source_title,
+        hook=hook,
+        short_description=short_description,
+        transcript_preview=transcript_preview,
+        signal_tags=signal_tags,
+    )
     cta_line = _build_caption_cta(signal_tags, hook, why_it_may_work)
+    slot_line = SLOT_COPY_RULES.get(str(slot_key or "").strip().lower(), "")
+
+    caption_parts: List[str] = []
+    if summary_line and _norm_text(summary_line) not in _norm_text(title):
+        caption_parts.append(summary_line)
+    if reaction_line and _norm_text(reaction_line) not in _norm_text(" ".join(caption_parts)):
+        caption_parts.append(reaction_line)
     if cta_line and _norm_text(cta_line) not in _norm_text(" ".join(caption_parts)):
         caption_parts.append(cta_line)
-    if source_channel and _norm_text(source_channel) not in _norm_text(" ".join(caption_parts)):
-        caption_parts.append(f"Clip de {source_channel}.")
+    if slot_line and _norm_text(slot_line) not in _norm_text(" ".join(caption_parts)):
+        caption_parts.append(slot_line)
+    source_line = _source_channel_line(source_channel, title)
+    if source_line and _norm_text(source_line) not in _norm_text(" ".join(caption_parts)):
+        caption_parts.append(source_line)
+
     caption = ""
-    for idx, part in enumerate(part.strip() for part in caption_parts if part):
+    for part in (part.strip() for part in caption_parts if part):
         if not caption:
             caption = part
             continue
-        separator = " "
-        if caption[-1] not in ".!?":
-            separator = ". "
+        separator = " " if caption[-1] in ".!?" else ". "
         caption = f"{caption}{separator}{part}"
     caption = _truncate_copy(caption, 170)
+
     hashtags = _build_topic_hashtags(
         source_title,
         source_channel,
@@ -464,7 +953,12 @@ def build_tiktok_copy(
     )
     channel_hashtag = _channel_hashtag(source_channel)
     if channel_hashtag and channel_hashtag not in hashtags:
-        hashtags = [channel_hashtag, *hashtags][:4]
+        hashtags = [channel_hashtag, *hashtags]
+    preferred_specific_tags = ["#hongkong", "#india", "#qatar", "#podcast", "#ventas", "#marketing", "#bromas", "#calle"]
+    for preferred in reversed(preferred_specific_tags):
+        if preferred in hashtags:
+            hashtags = [preferred if tag == preferred else tag for tag in [preferred, *[item for item in hashtags if item != preferred]]]
+    hashtags = _dedupe_keep_order(hashtags)[:4]
     return title, caption, hashtags
 
 
@@ -483,6 +977,312 @@ def _creator_mode_candidates(candidates: List[VideoCandidate], log_fn: Callable[
         filtered.append(c)
     _log(f"Filtro Creadores ES: {len(filtered)}/{len(candidates)} candidatos tras excluir labels/trailers/canales corporativos.")
     return filtered
+
+
+def _extract_video_id_from_url(url: str) -> str:
+    raw = str(url or "").strip()
+    if not raw:
+        return ""
+    match = re.search(r"(?:v=|youtu\.be/)([A-Za-z0-9_-]{6,})", raw)
+    if match:
+        return match.group(1)
+    return ""
+
+
+def _candidate_video_key(candidate: VideoCandidate | dict[str, Any] | None = None, *, source_url: str = "", video_id: str = "") -> str:
+    candidate_video_id = ""
+    candidate_url = ""
+    candidate_title = ""
+    candidate_channel = ""
+    if candidate is not None:
+        if isinstance(candidate, dict):
+            candidate_video_id = str(candidate.get("video_id") or "").strip()
+            candidate_url = str(candidate.get("url") or "").strip()
+            candidate_title = str(candidate.get("title") or "").strip()
+            candidate_channel = str(candidate.get("channel") or "").strip()
+        else:
+            candidate_video_id = str(candidate.video_id or "").strip()
+            candidate_url = str(candidate.url or "").strip()
+            candidate_title = str(candidate.title or "").strip()
+            candidate_channel = str(candidate.channel or "").strip()
+
+    resolved_video_id = str(video_id or candidate_video_id or "").strip() or _extract_video_id_from_url(source_url or candidate_url)
+    if resolved_video_id:
+        return f"yt:{resolved_video_id}"
+
+    resolved_url = str(source_url or candidate_url or "").strip()
+    if resolved_url:
+        return f"url:{resolved_url.lower()}"
+
+    fallback = slugify(f"{candidate_channel}-{candidate_title}", max_len=80)
+    return f"fallback:{fallback}" if fallback else ""
+
+
+def _load_used_video_history() -> list[dict[str, Any]]:
+    cutoff_ts = (datetime.utcnow() - timedelta(hours=USED_VIDEO_COOLDOWN_HOURS)).timestamp()
+    entries: list[dict[str, Any]] = []
+    try:
+        if USED_VIDEO_HISTORY_FILE.exists():
+            payload = json.loads(USED_VIDEO_HISTORY_FILE.read_text(encoding="utf-8"))
+            if isinstance(payload, list):
+                for item in payload:
+                    if not isinstance(item, dict):
+                        continue
+                    video_key = str(item.get("video_key") or "").strip()
+                    used_at_raw = str(item.get("used_at") or "").strip()
+                    if not video_key or not used_at_raw:
+                        continue
+                    try:
+                        used_at = datetime.fromisoformat(used_at_raw.replace("Z", "+00:00"))
+                    except Exception:
+                        continue
+                    used_at_ts = used_at.timestamp()
+                    if used_at_ts < cutoff_ts:
+                        continue
+                    entries.append(
+                        {
+                            "video_key": video_key,
+                            "source_url": str(item.get("source_url") or "").strip(),
+                            "source_title": str(item.get("source_title") or "").strip(),
+                            "source_channel": str(item.get("source_channel") or "").strip(),
+                            "used_at": used_at.isoformat(),
+                            "context": str(item.get("context") or "").strip(),
+                        }
+                    )
+    except Exception:
+        return []
+    entries.sort(key=lambda item: item.get("used_at") or "", reverse=True)
+    return entries[:USED_VIDEO_HISTORY_LIMIT]
+
+
+def _save_used_video_history(entries: list[dict[str, Any]]) -> None:
+    trimmed = sorted(entries, key=lambda item: item.get("used_at") or "", reverse=True)[:USED_VIDEO_HISTORY_LIMIT]
+    USED_VIDEO_HISTORY_FILE.write_text(json.dumps(trimmed, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def recent_used_video_keys() -> set[str]:
+    entries = _load_used_video_history()
+    try:
+        _save_used_video_history(entries)
+    except Exception:
+        pass
+    return {str(item.get("video_key") or "").strip() for item in entries if str(item.get("video_key") or "").strip()}
+
+
+def recent_used_channel_keys() -> set[str]:
+    cutoff_ts = (datetime.utcnow() - timedelta(hours=USED_CREATOR_COOLDOWN_HOURS)).timestamp()
+    keys: set[str] = set()
+    for item in _load_used_video_history():
+        used_at_raw = str(item.get("used_at") or "").strip()
+        if not used_at_raw:
+            continue
+        try:
+            used_at = datetime.fromisoformat(used_at_raw.replace("Z", "+00:00"))
+        except Exception:
+            continue
+        if used_at.timestamp() < cutoff_ts:
+            continue
+        channel = str(item.get("source_channel") or "").strip().lower()
+        if channel:
+            keys.add(channel)
+    return keys
+
+
+def record_used_video(
+    *,
+    source_url: str,
+    source_title: str = "",
+    source_channel: str = "",
+    video_id: str = "",
+    context: str = "telegram_review",
+) -> None:
+    video_key = _candidate_video_key(source_url=source_url, video_id=video_id)
+    if not video_key:
+        return
+
+    entries = [item for item in _load_used_video_history() if str(item.get("video_key") or "").strip() != video_key]
+    entries.insert(
+        0,
+        {
+            "video_key": video_key,
+            "source_url": str(source_url or "").strip(),
+            "source_title": str(source_title or "").strip(),
+            "source_channel": str(source_channel or "").strip(),
+            "used_at": datetime.utcnow().isoformat(),
+            "context": context,
+        },
+    )
+    _save_used_video_history(entries)
+
+
+def backfill_recent_used_videos_from_output(output_root: Path | None = None) -> int:
+    root = (output_root or (REPO_ROOT / "output")).resolve()
+    if not root.exists():
+        return 0
+
+    manifests = sorted(root.glob("*/options_manifest.json"), key=lambda path: path.stat().st_mtime, reverse=True)
+    cutoff = datetime.utcnow() - timedelta(hours=USED_VIDEO_COOLDOWN_HOURS)
+    history = [item for item in _load_used_video_history()]
+    existing_keys = {str(item.get("video_key") or "").strip() for item in history}
+    added = 0
+
+    for manifest_path in manifests:
+        try:
+            modified = datetime.utcfromtimestamp(manifest_path.stat().st_mtime)
+            if modified < cutoff:
+                continue
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+            source_url = str(payload.get("source_url") or "").strip()
+            source_title = str(payload.get("source_title") or "").strip()
+            source_channel = str(payload.get("source_channel") or "").strip()
+            video_key = _candidate_video_key(source_url=source_url)
+            if not video_key or video_key in existing_keys:
+                continue
+            history.append(
+                {
+                    "video_key": video_key,
+                    "source_url": source_url,
+                    "source_title": source_title,
+                    "source_channel": source_channel,
+                    "used_at": modified.isoformat(),
+                    "context": "output_backfill",
+                }
+            )
+            existing_keys.add(video_key)
+            added += 1
+        except Exception:
+            continue
+
+    if added:
+        _save_used_video_history(history)
+    return added
+
+
+def _load_performance_memory() -> list[dict[str, Any]]:
+    cutoff_ts = (datetime.utcnow() - timedelta(days=PERFORMANCE_MEMORY_DAYS)).timestamp()
+    entries: list[dict[str, Any]] = []
+    try:
+        if PERFORMANCE_MEMORY_FILE.exists():
+            payload = json.loads(PERFORMANCE_MEMORY_FILE.read_text(encoding="utf-8"))
+            if isinstance(payload, list):
+                for item in payload:
+                    if not isinstance(item, dict):
+                        continue
+                    timestamp_raw = str(item.get("timestamp") or "").strip()
+                    signal = str(item.get("signal") or "").strip()
+                    if not timestamp_raw or not signal:
+                        continue
+                    try:
+                        ts = datetime.fromisoformat(timestamp_raw.replace("Z", "+00:00"))
+                    except Exception:
+                        continue
+                    if ts.timestamp() < cutoff_ts:
+                        continue
+                    entries.append(
+                        {
+                            "timestamp": ts.isoformat(),
+                            "signal": signal,
+                            "weight": float(item.get("weight") or 0.0),
+                            "slot_key": str(item.get("slot_key") or "").strip().lower(),
+                            "video_key": str(item.get("video_key") or "").strip(),
+                            "channel_key": str(item.get("channel_key") or "").strip().lower(),
+                            "source_url": str(item.get("source_url") or "").strip(),
+                            "source_title": str(item.get("source_title") or "").strip(),
+                            "source_channel": str(item.get("source_channel") or "").strip(),
+                            "metadata": item.get("metadata") if isinstance(item.get("metadata"), dict) else {},
+                        }
+                    )
+    except Exception:
+        return []
+    entries.sort(key=lambda item: item.get("timestamp") or "", reverse=True)
+    return entries[:PERFORMANCE_MEMORY_LIMIT]
+
+
+def _save_performance_memory(entries: list[dict[str, Any]]) -> None:
+    trimmed = sorted(entries, key=lambda item: item.get("timestamp") or "", reverse=True)[:PERFORMANCE_MEMORY_LIMIT]
+    PERFORMANCE_MEMORY_FILE.write_text(json.dumps(trimmed, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+PERFORMANCE_SIGNAL_WEIGHTS = {
+    "telegram_approved": 4.0,
+    "telegram_cancelled": -4.0,
+    "queued_next_batch": 1.5,
+    "published_tiktok": 8.0,
+    "pending_manual_review": 2.0,
+    "publish_unconfirmed": 1.0,
+    "failed_tiktok": -3.5,
+}
+
+
+def record_performance_signal(
+    *,
+    source_url: str = "",
+    source_title: str = "",
+    source_channel: str = "",
+    video_id: str = "",
+    slot_key: str = "",
+    signal: str,
+    weight: float | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    signal_name = str(signal or "").strip()
+    if not signal_name:
+        return
+    channel_key = (source_channel or "").strip().lower()
+    video_key = _candidate_video_key(source_url=source_url, video_id=video_id)
+    if not video_key and not channel_key:
+        return
+
+    entries = _load_performance_memory()
+    entries.insert(
+        0,
+        {
+            "timestamp": datetime.utcnow().isoformat(),
+            "signal": signal_name,
+            "weight": float(PERFORMANCE_SIGNAL_WEIGHTS.get(signal_name, 0.0) if weight is None else weight),
+            "slot_key": str(slot_key or "").strip().lower(),
+            "video_key": video_key,
+            "channel_key": channel_key,
+            "source_url": str(source_url or "").strip(),
+            "source_title": str(source_title or "").strip(),
+            "source_channel": str(source_channel or "").strip(),
+            "metadata": dict(metadata or {}),
+        },
+    )
+    _save_performance_memory(entries)
+
+
+def _performance_bias(candidate: VideoCandidate, slot_key: str) -> float:
+    entries = _load_performance_memory()
+    if not entries:
+        return 0.0
+
+    candidate_video_key = _candidate_video_key(candidate)
+    candidate_channel_key = _channel_key(candidate)
+    normalized_slot_key = str(slot_key or "").strip().lower()
+    now_utc = datetime.utcnow()
+    bias = 0.0
+
+    for item in entries:
+        weight = float(item.get("weight") or 0.0)
+        if abs(weight) < 0.01:
+            continue
+        timestamp_raw = str(item.get("timestamp") or "").strip()
+        try:
+            ts = datetime.fromisoformat(timestamp_raw.replace("Z", "+00:00")).replace(tzinfo=None)
+        except Exception:
+            ts = now_utc
+        age_days = max(0.0, (now_utc - ts).total_seconds() / 86400.0)
+        decay = max(0.15, 1.0 - (age_days / max(1.0, float(PERFORMANCE_MEMORY_DAYS))))
+        same_slot = normalized_slot_key and str(item.get("slot_key") or "").strip().lower() == normalized_slot_key
+        item_video_key = str(item.get("video_key") or "").strip()
+        item_channel_key = str(item.get("channel_key") or "").strip().lower()
+        if candidate_video_key and item_video_key == candidate_video_key:
+            bias += weight * decay * (2.3 if same_slot else 1.8)
+        elif candidate_channel_key and item_channel_key == candidate_channel_key:
+            bias += weight * decay * (1.1 if same_slot else 0.7)
+
+    return max(-18.0, min(18.0, bias))
 
 
 def score_candidate_ai(c: VideoCandidate, today: date) -> tuple[float, str]:
@@ -562,6 +1362,14 @@ def discover_creator_videos(
     yt_trend_categories = [x.strip() for x in os.getenv("YOUTUBE_TREND_CATEGORY_IDS", "").split(",") if x.strip()]
     used_charts = False
 
+    if mode == "creators_es":
+        _log("Usando un pool curado de creadores espanoles actuales para clips: gaming, stream, videoblog, viaje y charla.")
+        _log(f"Escaneando {len(channels)} canales curados...")
+        candidates = discover_from_channels(channels, per_channel_scan=max(8, min(per_channel_scan, 18)))
+        candidates = _creator_mode_candidates(candidates, log_fn=_log)
+        # Fuerza Creadores ES a depender del pool curado y no de charts generales.
+        yt_api_key = ""
+
     if yt_api_key and mode in {"viral_es", "creators_es"}:
         try:
             if mode == "creators_es":
@@ -593,8 +1401,8 @@ def discover_creator_videos(
         except Exception as exc:
             raise RuntimeError(f"YouTube Data API fallo en modo {mode}: {exc}") from exc
 
-    if mode == "creators_es" and len(candidates) < max_results:
-        _log("Pool oficial de creadores escaso; completando con un pool curado de creadores espaÃ±oles.")
+    if mode == "creators_es" and used_charts and len(candidates) < max_results:
+        _log("Pool oficial de creadores escaso; completando con un pool curado de creadores españoles.")
         extra_channel_candidates = discover_from_channels(channels, per_channel_scan=max(6, min(per_channel_scan, 12)))
         seen_ids = {c.video_id for c in candidates if c.video_id}
         for c in extra_channel_candidates:
@@ -609,10 +1417,14 @@ def discover_creator_videos(
             _log(f"Sin charts ES disponibles para {mode}. Usando fallback por canales; los resultados ya no son charts oficiales.")
         _log(f"Escaneando {len(channels)} canales...")
         candidates = discover_from_channels(channels, per_channel_scan=per_channel_scan)
+        if mode == "creators_es":
+            candidates = _creator_mode_candidates(candidates, log_fn=_log)
     if not candidates:
         _log("Sin resultados por canales. Probando fallback de busqueda...")
-        search_q = "TheGrefg AuronPlay Ibai YoSoyPlex elrubius"
+        search_q = DEFAULT_CREATOR_SEARCH_QUERY if mode == "creators_es" else "TheGrefg AuronPlay Ibai YoSoyPlex elrubius"
         candidates = discover_from_search(search_q, search_limit=max(30, max_results * 4))
+        if mode == "creators_es":
+            candidates = _creator_mode_candidates(candidates, log_fn=_log)
     _log(f"Candidatos brutos: {len(candidates)}")
     enrich_limit = min(len(candidates), max(max_results * 2, 20))
     _log(f"Enriqueciendo metadatos de {enrich_limit} videos...")
@@ -691,6 +1503,344 @@ def discover_creator_videos(
         channels_used = len({(c.channel or "").strip().lower() for c in selected if (c.channel or "").strip()})
         _log(f"Seleccion final: {len(selected)} videos de {max(1, channels_used)} canales")
     return selected
+
+
+def _planner_title_traits(candidate: VideoCandidate) -> dict[str, bool]:
+    title = _norm_text(candidate.title)
+    return {
+        "question": "?" in (candidate.title or ""),
+        "digits": bool(re.search(r"\b\d+\b", title)),
+        "comparison": bool(re.search(r"\bo\b|vs|versus", title)),
+        "impact": any(term in title for term in ("nunca", "brutal", "historia", "record", "reto", "locura")),
+        "story": any(term in title for term in ("historia", "entrevista", "charla", "podcast", "explica", "cuenta")),
+    }
+
+
+def _daily_plan_score(candidate: VideoCandidate, slot: dict[str, str], *, used_channels: set[str]) -> float:
+    channel_key = _channel_key(candidate)
+    if channel_key in used_channels:
+        return -999.0
+
+    traits = _planner_title_traits(candidate)
+    slot_key = slot.get("slot_key", "")
+    score = float(candidate.ai_score or 0.0) * 0.62
+    score += min(22.0, math.log10(float(candidate.views_per_day or 0.0) + 1.0) * 10.0)
+    score += min(14.0, math.log10(float(candidate.view_count or 0.0) + 1.0) * 4.0)
+    if slot_key == "morning":
+        if traits["question"] or traits["digits"]:
+            score += 9.0
+        if traits["story"]:
+            score += 4.0
+    elif slot_key == "lunch":
+        if traits["question"] or traits["comparison"]:
+            score += 9.0
+        if traits["digits"]:
+            score += 5.0
+    elif slot_key == "afternoon":
+        if traits["impact"]:
+            score += 8.0
+        if traits["digits"]:
+            score += 4.0
+    elif slot_key == "prime":
+        if traits["impact"]:
+            score += 10.0
+        score += min(10.0, math.log10(float(candidate.view_count or 0.0) + 1.0) * 1.2)
+    elif slot_key == "late":
+        if traits["story"] or traits["question"]:
+            score += 8.0
+        if traits["comparison"]:
+            score += 4.0
+
+    score += _performance_bias(candidate, slot_key)
+    return score
+
+
+def _plan_entry(candidate: VideoCandidate, *, slot: dict[str, str], plan_score: float, role: str) -> dict[str, Any]:
+    views = int(candidate.view_count or 0)
+    views_per_day = float(candidate.views_per_day or 0.0)
+    return {
+        "slot_key": slot.get("slot_key", role),
+        "slot_label": slot.get("label", role.title()),
+        "publish_time": slot.get("publish_time", ""),
+        "strategy": slot.get("strategy", ""),
+        "role": role,
+        "plan_score": round(plan_score, 1),
+        "reason": candidate.ai_reason or "equilibrio general de señales",
+        "candidate": candidate,
+        "summary": f"{candidate.channel} | {views:,} views | {views_per_day:,.0f}/dia".replace(",", "."),
+    }
+
+
+def _slot_minutes(slot: dict[str, str]) -> int:
+    raw = str(slot.get("publish_time") or "00:00").strip()
+    try:
+        hour_s, minute_s = raw.split(":", 1)
+        return int(hour_s) * 60 + int(minute_s)
+    except Exception:
+        return 0
+
+
+def _pick_active_slots(posts_per_day: int) -> list[dict[str, str]]:
+    posts_per_day = max(1, min(posts_per_day, len(PLANNER_SLOTS)))
+    if posts_per_day >= len(PLANNER_SLOTS):
+        return list(PLANNER_SLOTS)
+
+    timezone_name = os.getenv("PLAN_TIMEZONE", "Europe/Madrid").strip() or "Europe/Madrid"
+    try:
+        now_local = datetime.now(ZoneInfo(timezone_name))
+    except Exception:
+        now_local = datetime.now()
+    now_minutes = now_local.hour * 60 + now_local.minute
+
+    ranked = sorted(
+        enumerate(PLANNER_SLOTS),
+        key=lambda pair: abs(_slot_minutes(pair[1]) - now_minutes),
+    )
+    selected_indexes = sorted(idx for idx, _slot in ranked[:posts_per_day])
+    return [PLANNER_SLOTS[idx] for idx in selected_indexes]
+
+
+def _build_slot_alternatives(
+    candidates: List[VideoCandidate],
+    *,
+    slot: dict[str, str],
+    primary_candidate: VideoCandidate,
+    slot_option_count: int,
+    blocked_channels: set[str],
+) -> list[dict[str, Any]]:
+    if slot_option_count <= 1:
+        return []
+
+    selected_channels = {_channel_key(primary_candidate)}
+    alternatives: list[dict[str, Any]] = []
+    ranked = sorted(
+        candidates,
+        key=lambda candidate: _daily_plan_score(candidate, slot, used_channels=set()),
+        reverse=True,
+    )
+
+    for candidate in ranked:
+        channel_key = _channel_key(candidate)
+        if channel_key in selected_channels:
+            continue
+        if channel_key in blocked_channels:
+            continue
+        score = _daily_plan_score(candidate, slot, used_channels=set())
+        alternatives.append(_plan_entry(candidate, slot=slot, plan_score=score, role="alternative"))
+        selected_channels.add(channel_key)
+        if len(alternatives) >= slot_option_count - 1:
+            return alternatives
+
+    for candidate in ranked:
+        channel_key = _channel_key(candidate)
+        if channel_key in selected_channels:
+            continue
+        score = _daily_plan_score(candidate, slot, used_channels=set())
+        alternatives.append(_plan_entry(candidate, slot=slot, plan_score=score, role="alternative"))
+        selected_channels.add(channel_key)
+        if len(alternatives) >= slot_option_count - 1:
+            break
+
+    return alternatives
+
+
+def _exclude_recently_used_candidates(
+    candidates: List[VideoCandidate],
+    *,
+    minimum_needed: int,
+    log_fn: Callable[[str], None] | None = None,
+) -> List[VideoCandidate]:
+    recent_keys = recent_used_video_keys()
+    if not recent_keys:
+        return candidates
+
+    fresh = [candidate for candidate in candidates if _candidate_video_key(candidate) not in recent_keys]
+    repeated = len(candidates) - len(fresh)
+    if log_fn:
+        log_fn(f"Excluyendo {repeated} videos usados recientemente de la planificacion.")
+
+    if len(fresh) >= minimum_needed:
+        return fresh
+
+    if log_fn:
+        log_fn(
+            "No habia suficientes candidatos frescos para cubrir toda la tanda; "
+            "rellenando con algunos repetidos antiguos solo si hace falta."
+        )
+    return fresh + [candidate for candidate in candidates if _candidate_video_key(candidate) in recent_keys]
+
+
+def _dedupe_candidates_by_video(candidates: List[VideoCandidate]) -> List[VideoCandidate]:
+    seen: set[str] = set()
+    deduped: List[VideoCandidate] = []
+    for candidate in candidates:
+        key = _candidate_video_key(candidate)
+        if key and key in seen:
+            continue
+        if key:
+            seen.add(key)
+        deduped.append(candidate)
+    return deduped
+
+
+def build_daily_post_plan(
+    *,
+    channels: List[str] | None = None,
+    per_channel_scan: int = 12,
+    this_week_only: bool = True,
+    min_source_duration: int = 90,
+    max_results: int = 18,
+    posts_per_day: int = 4,
+    reserve_count: int = 2,
+    slot_option_count: int = 3,
+    mode: str = "creators_es",
+    log_fn: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
+    posts_per_day = max(1, min(posts_per_day, len(PLANNER_SLOTS)))
+    reserve_count = max(0, min(reserve_count, 4))
+    slot_option_count = max(1, min(slot_option_count, 3))
+
+    candidates = discover_creator_videos(
+        channels=channels,
+        per_channel_scan=per_channel_scan,
+        this_week_only=this_week_only,
+        min_source_duration=min_source_duration,
+        max_results=max(max_results, posts_per_day + reserve_count + 4),
+        mode=mode,
+        log_fn=log_fn,
+    )
+
+    if not candidates:
+        return {
+            "date": date.today().isoformat(),
+            "timezone": os.getenv("PLAN_TIMEZONE", "Europe/Madrid"),
+            "mode": mode,
+            "slots": [],
+            "reserves": [],
+            "notes": "Sin candidatos suficientes para construir el plan de hoy.",
+        }
+
+    minimum_needed = max(posts_per_day * slot_option_count, posts_per_day + reserve_count)
+    recent_keys = recent_used_video_keys()
+    recent_channel_keys = recent_used_channel_keys()
+    original_candidates = list(candidates)
+    if recent_keys:
+        fresh_candidates = [candidate for candidate in candidates if _candidate_video_key(candidate) not in recent_keys]
+        repeated = len(candidates) - len(fresh_candidates)
+        if log_fn:
+            log_fn(f"Excluyendo {repeated} videos usados recientemente de la planificacion.")
+        candidates = fresh_candidates
+
+    if recent_channel_keys:
+        fresh_channels = [candidate for candidate in candidates if _channel_key(candidate) not in recent_channel_keys]
+        repeated_channels = len(candidates) - len(fresh_channels)
+        if repeated_channels and log_fn:
+            log_fn(f"Excluyendo {repeated_channels} candidatos de creadores usados hace poco.")
+        candidates = fresh_channels
+
+    if len(candidates) < minimum_needed:
+        if log_fn:
+            log_fn(
+                "Variedad insuficiente tras excluir repetidos; ampliando la busqueda a videos recientes fuera de esta semana."
+            )
+        expanded_candidates = discover_creator_videos(
+            channels=channels,
+            per_channel_scan=max(per_channel_scan, 20),
+            this_week_only=False,
+            min_source_duration=min_source_duration,
+            max_results=max(max_results * 2, minimum_needed * 4, 40),
+            mode=mode,
+            log_fn=log_fn,
+        )
+        expanded_candidates = _dedupe_candidates_by_video(expanded_candidates)
+        if recent_keys:
+            expanded_candidates = [candidate for candidate in expanded_candidates if _candidate_video_key(candidate) not in recent_keys]
+        if recent_channel_keys:
+            expanded_candidates = [candidate for candidate in expanded_candidates if _channel_key(candidate) not in recent_channel_keys]
+        candidates = expanded_candidates
+
+    if len(candidates) < minimum_needed:
+        if log_fn:
+            log_fn(
+                "No habia suficientes candidatos frescos ni ampliando la ventana; reutilizando algunos repetidos como ultimo recurso."
+            )
+        candidates = _exclude_recently_used_candidates(
+            _dedupe_candidates_by_video(original_candidates + candidates),
+            minimum_needed=minimum_needed,
+            log_fn=None,
+        )
+
+    used_channels: set[str] = set()
+    planned: List[dict[str, Any]] = []
+    remaining = list(candidates)
+
+    active_slots = _pick_active_slots(posts_per_day)
+    for slot in active_slots:
+        best = max(remaining, key=lambda candidate: _daily_plan_score(candidate, slot, used_channels=used_channels))
+        best_score = _daily_plan_score(best, slot, used_channels=used_channels)
+        planned.append(_plan_entry(best, slot=slot, plan_score=best_score, role="planned"))
+        used_channels.add(_channel_key(best))
+        remaining = [candidate for candidate in remaining if _channel_key(candidate) != _channel_key(best)]
+        if not remaining:
+            break
+
+    planned_channel_keys = {
+        _channel_key(entry["candidate"])
+        for entry in planned
+        if entry.get("candidate") is not None
+    }
+    for entry in planned:
+        candidate = entry.get("candidate")
+        if candidate is None:
+            entry["alternatives"] = []
+            continue
+        blocked = {key for key in planned_channel_keys if key != _channel_key(candidate)}
+        entry["alternatives"] = _build_slot_alternatives(
+            candidates,
+            slot={
+                "slot_key": str(entry.get("slot_key") or ""),
+                "label": str(entry.get("slot_label") or ""),
+                "publish_time": str(entry.get("publish_time") or ""),
+                "strategy": str(entry.get("strategy") or ""),
+            },
+            primary_candidate=candidate,
+            slot_option_count=slot_option_count,
+            blocked_channels=blocked,
+        )
+
+    reserves: List[dict[str, Any]] = []
+    for candidate in remaining:
+        reserve_slot = {
+            "slot_key": "reserve",
+            "label": "Reserva",
+            "publish_time": "",
+            "strategy": "Guardado por si uno de los clips planeados no convence o toca sustituir creador.",
+        }
+        reserves.append(
+            _plan_entry(
+                candidate,
+                slot=reserve_slot,
+                plan_score=float(candidate.ai_score or 0.0),
+                role="reserve",
+            )
+        )
+        if len(reserves) >= reserve_count:
+            break
+
+    notes = "Ventanas sugeridas para probar hoy en España. La idea es comparar rendimiento real en @pixelboom8 y luego afinar por histórico."
+    if len(planned) < posts_per_day:
+        notes += f" Hoy solo salieron {len(planned)} creadores distintos con señal suficiente; mejor eso que forzar repetidos."
+    return {
+        "date": date.today().isoformat(),
+        "timezone": os.getenv("PLAN_TIMEZONE", "Europe/Madrid"),
+        "mode": mode,
+        "posts_per_day": posts_per_day,
+        "reserve_count": reserve_count,
+        "slot_option_count": slot_option_count,
+        "slots": planned,
+        "reserves": reserves,
+        "notes": notes,
+    }
 
 
 def _channel_key(candidate: VideoCandidate) -> str:
@@ -964,7 +2114,8 @@ def window_scene_cut_count(scene_times: List[float], start: float, end: float) -
 
 
 def summarize_transcript_preview(cues: List[CaptionCue], max_chars: int = 180) -> str:
-    text = " ".join(c.text.strip() for c in cues if c.text.strip())
+    cleaned_parts = [clean_caption_text(c.text) for c in cues]
+    text = " ".join(part for part in cleaned_parts if part)
     text = re.sub(r"\s+", " ", text).strip()
     if not text:
         return ""
@@ -973,7 +2124,7 @@ def summarize_transcript_preview(cues: List[CaptionCue], max_chars: int = 180) -
     trimmed = text[: max_chars - 1]
     if " " in trimmed:
         trimmed = trimmed.rsplit(" ", 1)[0]
-    return f"{trimmed}â€¦"
+    return f"{trimmed}..."
 
 
 def build_signal_tags(
@@ -983,11 +2134,14 @@ def build_signal_tags(
     question_hits: int,
     exclaim_hits: int,
     number_hits: int,
+    opening_hook_score: float,
     audio_score: float,
     visual_score: float,
     scene_cut_count: int,
 ) -> List[str]:
     tags: List[str] = []
+    if opening_hook_score >= 7.5:
+        tags.append("Hook fuerte")
     if question_hits > 0:
         tags.append("Pregunta")
     if number_hits > 0:
@@ -1086,9 +2240,12 @@ def _description_from_cues(in_window: List[CaptionCue]) -> tuple[str, str]:
     if not in_window:
         return "Momento destacado", "Fragmento con potencial de retencion."
 
-    joined = " ".join(c.text for c in in_window)
-    joined = html.unescape(joined)
-    joined = re.sub(r"\[&nbsp;__&nbsp;\]", " ", joined, flags=re.IGNORECASE)
+    cleaned_cues = [clean_caption_text(c.text) for c in in_window]
+    cleaned_cues = [text for text in cleaned_cues if text]
+    if not cleaned_cues:
+        return "Momento destacado", "Fragmento con potencial de retencion."
+
+    joined = " ".join(cleaned_cues)
     tokens = re.findall(r"\w+", joined.lower(), flags=re.UNICODE)
     num_hits = sum(1 for t in tokens if t.isdigit())
     has_question = "?" in joined
@@ -1108,15 +2265,12 @@ def _description_from_cues(in_window: List[CaptionCue]) -> tuple[str, str]:
         theme = "Momento entretenido"
 
     sample = ""
-    for cue in in_window:
-        txt = html.unescape(cue.text)
-        txt = re.sub(r"\[&nbsp;__&nbsp;\]", " ", txt, flags=re.IGNORECASE)
-        txt = re.sub(r"\s+", " ", txt).strip()
+    for txt in cleaned_cues:
         if len(txt) >= 22:
             sample = txt
             break
     if not sample:
-        sample = re.sub(r"\s+", " ", in_window[0].text).strip()
+        sample = cleaned_cues[0]
     words = sample.split()
     if len(words) > 15:
         sample = " ".join(words[:15]) + "..."
@@ -1181,6 +2335,18 @@ def window_score(
     question_rate = question_hits / duration
     opening_cues = [cue for cue in in_window if cue.start < start + min(6.0, duration * 0.28)]
     opening_hook_score = max((score_text(cue.text) for cue in opening_cues), default=0.0)
+    opening_blob = " ".join(cue.text for cue in opening_cues[:4])
+    opening_focus_text = extract_hook_focus_text(opening_blob)
+    opening_focus_bonus = 0.0
+    if opening_focus_text:
+        focus_tokens = re.findall(r"\w+", opening_focus_text, flags=re.UNICODE)
+        opening_focus_bonus += min(14.0, len(focus_tokens) * 3.2)
+        if any(token.isdigit() for token in focus_tokens):
+            opening_focus_bonus += 4.0
+        if " o " in f" {opening_focus_text.lower()} ":
+            opening_focus_bonus += 4.0
+    opening_word_count = len(re.findall(r"\w+", opening_blob, flags=re.UNICODE))
+    opening_density = opening_word_count / max(1.0, min(4.0, duration))
     dead_air_start = max(0.0, min(4.0, in_window[0].start - start))
     dead_air_end = max(0.0, min(4.0, end - in_window[-1].end))
 
@@ -1191,6 +2357,8 @@ def window_score(
         + interest_hits * 1.8
         + punctuation_bonus * 0.35
         + opening_hook_score * 2.2
+        + opening_focus_bonus * 1.5
+        + opening_density * 3.5
     )
     reach_score = (
         speech_density * 9.5
@@ -1200,17 +2368,21 @@ def window_score(
         + impact_rate * 6.0
         + exclaim_hits * 0.2
         + opening_hook_score * 1.4
+        + opening_focus_bonus * 1.2
+        + opening_density * 2.8
     )
     audio_score = window_audio_score(rms_by_second or {}, start, end)
     visual_score = window_visual_score(scene_times or [], start, end)
     scene_cut_count = window_scene_cut_count(scene_times or [], start, end)
     combined = (
-        interest_score * 0.46
-        + reach_score * 0.33
+        interest_score * 0.44
+        + reach_score * 0.31
         + audio_score * 0.12
         + visual_score * 0.09
+        + opening_hook_score * 1.3
+        + opening_focus_bonus * 1.1
     )
-    combined -= dead_air_start * 6.5
+    combined -= dead_air_start * 8.5
     combined -= dead_air_end * 3.0
     short_desc, why = _description_from_cues(in_window)
     topic_tokens = extract_topic_tokens(in_window)
@@ -1221,6 +2393,7 @@ def window_score(
         question_hits=question_hits,
         exclaim_hits=exclaim_hits,
         number_hits=number_hits,
+        opening_hook_score=opening_hook_score,
         audio_score=audio_score,
         visual_score=visual_score,
         scene_cut_count=scene_cut_count,
@@ -1229,6 +2402,8 @@ def window_score(
         why = f"{why} Audio con energia alta."
     if visual_score >= 55.0:
         why = f"{why} Ritmo visual dinamico."
+    if opening_focus_bonus >= 9.0 or opening_hook_score >= 8.0:
+        why = f"{why} Entra con hook claro en los primeros segundos."
     if signal_tags:
         why = f"{why} Senales: {', '.join(signal_tags)}."
     return WindowAnalysis(
@@ -1374,6 +2549,7 @@ def build_candidate_segments(
                         question_hits=0,
                         exclaim_hits=0,
                         number_hits=0,
+                        opening_hook_score=0.0,
                         audio_score=audio_score,
                         visual_score=visual_score,
                         scene_cut_count=window_scene_cut_count(scene_times or [], start, end),
@@ -1688,6 +2864,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--stride", type=int, default=10, help="Sliding window step in seconds.")
     p.add_argument("--max-pool", type=int, default=50, help="Window pool size before overlap filter.")
     p.add_argument("--overlap-ratio", type=float, default=0.40, help="Max overlap ratio between options.")
+    p.add_argument("--slot-key", default="")
     p.add_argument("--output-dir", default="output")
     p.add_argument("--work-dir", default="work")
     return p
@@ -1719,15 +2896,26 @@ def generate_dashboard(config: DashboardConfig, log_fn: Callable[[str], None] = 
     source_duration = float(info.get("duration") or 0.0)
     source_slug = slugify(source_title, max_len=55)
 
-    cues: List[CaptionCue] = []
-    if subtitle_file and subtitle_file.exists() and subtitle_file.suffix.lower() == ".vtt":
-        cues = parse_vtt(subtitle_file)
-        log_fn(f"Subtitulos encontrados: {subtitle_file.name}")
-    else:
-        log_fn("No hay subtitulos: opciones se repartiran por duracion.")
-
     if source_duration <= 0:
         raise RuntimeError("No se pudo detectar duracion del video.")
+
+    cues, caption_source = load_best_caption_cues(
+        ffmpeg_bin,
+        source_video,
+        subtitle_file,
+        language=config.language,
+        source_duration=source_duration,
+        log_fn=log_fn,
+    )
+    if cues:
+        if caption_source == "faster_whisper":
+            log_fn(f"Subtitulos generados con transcripcion propia ({len(cues)} cues).")
+        elif subtitle_file and subtitle_file.exists():
+            log_fn(f"Subtitulos cargados desde {subtitle_file.name} ({len(cues)} cues).")
+        else:
+            log_fn(f"Subtitulos cargados desde {caption_source} ({len(cues)} cues).")
+    else:
+        log_fn("No hay subtitulos utiles: opciones se repartiran por duracion.")
 
     # Signal analysis for stronger clip ranking.
     analysis_cap = max(60, min(300, int(os.getenv("CLIP_ANALYSIS_MAX_SECONDS", "150"))))
@@ -1773,12 +2961,19 @@ def generate_dashboard(config: DashboardConfig, log_fn: Callable[[str], None] = 
             why_it_may_work=cand.why_it_may_work,
             transcript_preview=cand.transcript_preview,
             signal_tags=cand.signal_tags,
+            slot_key=config.slot_key,
         )
-        overlay_hook_text = " ".join(
-            part.strip()
-            for part in (tiktok_title, cand.short_description, cand.transcript_preview)
-            if part and part.strip()
+        overlay_hook_text = (
+            _strip_clip_prefix(tiktok_title).rstrip(".!?… ").strip()
+            or _strip_clip_prefix(extract_hook_focus_text(seg.hook)).rstrip(".!?… ").strip()
+            or _strip_clip_prefix(cand.short_description).rstrip(".!?… ").strip()
+            or _strip_clip_prefix(cand.transcript_preview).rstrip(".!?… ").strip()
         )
+        focus_x = None
+        try:
+            focus_x = detect_subject_focus_x(source_video, start=seg.start, end=seg.end)
+        except Exception:
+            focus_x = None
         log_fn(f"Render option {idx}/{len(selected)} ({seg.start:.1f}s -> {seg.end:.1f}s)")
         subtitle_ass = job_dir / f"option_{idx:02}.ass"
         if cues:
@@ -1797,6 +2992,8 @@ def generate_dashboard(config: DashboardConfig, log_fn: Callable[[str], None] = 
             hook_text=overlay_hook_text,
             subtitle_ass=subtitle_ass,
             include_hook_overlay=False,
+            fast_render=config.fast_render,
+            focus_x=focus_x,
         )
         (job_dir / preview_name).replace(out_video)
         try:
@@ -1837,8 +3034,12 @@ def generate_dashboard(config: DashboardConfig, log_fn: Callable[[str], None] = 
 
     manifest = {
         "source_title": source_title,
+        "source_channel": str(info.get("channel") or info.get("uploader") or ""),
         "source_url": info.get("webpage_url") or config.url,
+        "video_id": str(info.get("id") or candidate.video_id or ""),
         "source_duration": source_duration,
+        "slot_key": config.slot_key,
+        "caption_source": caption_source,
         "options": [asdict(o) for o in options],
     }
     manifest_path = dashboard_dir / "options_manifest.json"
@@ -1858,8 +3059,10 @@ def generate_dashboard(config: DashboardConfig, log_fn: Callable[[str], None] = 
         dashboard_dir=str(dashboard_dir),
         dashboard_html=str(html_path),
         manifest_path=str(manifest_path),
+        work_job_dir=str(job_dir),
         source_title=source_title,
         source_url=manifest["source_url"],
+        slot_key=config.slot_key,
         options=options,
     )
 
@@ -1874,6 +3077,7 @@ def main() -> int:
         stride=args.stride,
         max_pool=args.max_pool,
         overlap_ratio=args.overlap_ratio,
+        slot_key=args.slot_key,
         output_dir=args.output_dir,
         work_dir=args.work_dir,
     )
@@ -1887,4 +3091,7 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("[clip-dashboard] Interrumpido por usuario.")
         raise SystemExit(130)
+
+
+
 
