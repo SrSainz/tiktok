@@ -324,6 +324,17 @@ def clean_caption_text(text: str) -> str:
     return text
 
 
+def detect_subject_focus_x(
+    source_video: Path,
+    *,
+    start: float,
+    end: float,
+) -> Optional[float]:
+    # Compatibility shim for planner imports. Keep the short layout stable and
+    # avoid reintroducing smart focus recrops while we are fixing subtitle quality.
+    return None
+
+
 def wrap_caption_lines(words: List[str], max_line_chars: int = 24, max_lines: int = 1) -> str:
     if not words:
         return ""
