@@ -993,7 +993,8 @@ def render_short(
     fade_out_start = max(0.0, clip_duration - 0.16)
     base_comp = (
         "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,"
-        "crop=1080:1920,boxblur=22:12[bg];"
+        "crop=1080:1920,boxblur=22:12,"
+        "eq=brightness=0.08:contrast=1.10:saturation=1.18:gamma=1.06[bg];"
         "[0:v]scale=1080:1920:force_original_aspect_ratio=decrease,"
         "setsar=1,eq=contrast=1.05:saturation=1.10[fg];"
         "[bg][fg]overlay=(W-w)/2:(H-h)/2[vbase]"
@@ -1075,7 +1076,8 @@ def render_short(
     fb_fade_out_start = max(0.0, clip_duration - 0.16)
     fallback_comp = (
         "[0:v]scale=720:1280:force_original_aspect_ratio=increase,"
-        "crop=720:1280,boxblur=18:10[bg];"
+        "crop=720:1280,boxblur=18:10,"
+        "eq=brightness=0.08:contrast=1.08:saturation=1.15:gamma=1.05[bg];"
         "[0:v]scale=720:1280:force_original_aspect_ratio=decrease,setsar=1[fg];"
         "[bg][fg]overlay=(W-w)/2:(H-h)/2[vbase]"
     )
