@@ -958,6 +958,14 @@ def download_source_video(candidate: VideoCandidate, job_dir: Path, language: st
     media_only_best.pop("merge_output_format", None)
     attempts.append(("Reintentando con el mejor formato disponible...", media_only_best))
 
+    no_cookie_preferred = dict(media_only_preferred)
+    no_cookie_preferred.pop("cookiefile", None)
+    attempts.append(("Reintentando sin cookies con formato preferido...", no_cookie_preferred))
+
+    no_cookie_best = dict(media_only_best)
+    no_cookie_best.pop("cookiefile", None)
+    attempts.append(("Reintentando sin cookies con el mejor formato disponible...", no_cookie_best))
+
     info: Optional[dict] = None
     last_exc: Optional[Exception] = None
     for idx, (label, opts) in enumerate(attempts, start=1):
