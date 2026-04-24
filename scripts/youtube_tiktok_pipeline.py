@@ -392,6 +392,56 @@ def ass_filter_path(path: Path) -> str:
     return value
 
 
+def _even(value: int) -> int:
+    return value if value % 2 == 0 else value + 1
+
+
+def detect_active_crop_filter(ffmpeg_bin: str, input_video: Path, start: float) -> str:
+    sample_start = max(0.0, start + 0.6)
+    cmd = [
+        ffmpeg_bin,
+        "-hide_banner",
+        "-ss",
+        f"{sample_start:.3f}",
+        "-i",
+        str(input_video.name),
+        "-t",
+        "1.4",
+        "-vf",
+        "cropdetect=limit=24:round=2:reset=0",
+        "-f",
+        "null",
+        "-",
+    ]
+    proc = subprocess.run(cmd, cwd=input_video.parent, capture_output=True, text=True)
+    if proc.returncode != 0:
+        return ""
+    matches = re.findall(r"crop=(\d+):(\d+):(\d+):(\d+)", proc.stderr or "")
+    if not matches:
+        return ""
+    width, height, x, y = (int(v) for v in matches[-1])
+    if width < 480 or height < 270:
+        return ""
+    aspect = width / max(1, height)
+    if aspect < 1.15 or aspect > 2.7:
+        return ""
+    return f"crop={width}:{height}:{x}:{y},"
+
+
+def youtube_blur_compose_filter(width: int, height: int, crop_filter: str = "") -> str:
+    foreground_height = _even(round(width * 9 / 16))
+    return (
+        f"[0:v]{crop_filter}split=2[base_bg][base_fg];"
+        f"[base_bg]scale={width}:{height}:force_original_aspect_ratio=increase,"
+        f"crop={width}:{height},boxblur=22:12,"
+        "eq=brightness=0.14:contrast=1.12:saturation=1.14:gamma=1.14[bg];"
+        f"[base_fg]scale={width}:{foreground_height}:force_original_aspect_ratio=increase,"
+        f"crop={width}:{foreground_height},setsar=1,"
+        "eq=brightness=0.03:contrast=1.05:saturation=1.06:gamma=1.08[fg];"
+        "[bg][fg]overlay=(W-w)/2:(H-h)/2[vbase]"
+    )
+
+
 HOOK_STOPWORDS = {
     "A",
     "AL",
@@ -1025,14 +1075,8 @@ def render_short(
 ) -> None:
     clip_duration = max(0.15, segment.end - segment.start)
     fade_out_start = max(0.0, clip_duration - 0.16)
-    base_comp = (
-        "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,"
-        "crop=1080:1920,boxblur=22:12,"
-        "eq=brightness=0.16:contrast=1.14:saturation=1.18:gamma=1.18[bg];"
-        "[0:v]scale=1080:1920:force_original_aspect_ratio=decrease,"
-        "setsar=1,eq=brightness=0.05:contrast=1.08:saturation=1.10:gamma=1.14[fg];"
-        "[bg][fg]overlay=(W-w)/2:(H-h)/2[vbase]"
-    )
+    active_crop = detect_active_crop_filter(ffmpeg_bin, input_video, segment.start)
+    base_comp = youtube_blur_compose_filter(1080, 1920, active_crop)
     chains = [base_comp]
     current_label = "[vbase]"
     if subtitle_ass and subtitle_ass.exists():
@@ -1108,14 +1152,7 @@ def render_short(
 
     # Fallback for constrained hosts (Railway-like): lower resolution + lighter encode.
     fb_fade_out_start = max(0.0, clip_duration - 0.16)
-    fallback_comp = (
-        "[0:v]scale=720:1280:force_original_aspect_ratio=increase,"
-        "crop=720:1280,boxblur=18:10,"
-        "eq=brightness=0.14:contrast=1.12:saturation=1.15:gamma=1.12[bg];"
-        "[0:v]scale=720:1280:force_original_aspect_ratio=decrease,"
-        "setsar=1,eq=brightness=0.04:contrast=1.06:saturation=1.08:gamma=1.10[fg];"
-        "[bg][fg]overlay=(W-w)/2:(H-h)/2[vbase]"
-    )
+    fallback_comp = youtube_blur_compose_filter(720, 1280, active_crop).replace("boxblur=22:12", "boxblur=18:10")
     fallback_chains = [fallback_comp]
     fallback_label = "[vbase]"
     if subtitle_ass and subtitle_ass.exists():
