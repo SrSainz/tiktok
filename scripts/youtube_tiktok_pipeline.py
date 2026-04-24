@@ -942,35 +942,45 @@ def download_source_video(candidate: VideoCandidate, job_dir: Path, language: st
         "noprogress": True,
         "ffmpeg_location": ffmpeg_bin,
     })
+    attempts: List[tuple[str, dict]] = [
+        ("Descargando video y subtitulos con formato preferido...", dict(ydl_opts)),
+    ]
 
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(candidate.url, download=True)
-    except Exception as exc:
-        exc_text = str(exc)
-        if "Sign in to confirm you" in exc_text or "not a bot" in exc_text:
-            hint = (
-                "YouTube bloquea la descarga desde este servidor. "
-                "Configura YTDLP_COOKIES_FILE apuntando a un cookies.txt valido."
-            )
-            raise RuntimeError(f"{exc_text}\n{hint}") from exc
-        # Common failure: subtitle/caption endpoints return 429.
-        # Retry downloading only media so pipeline can still continue.
-        retry_opts = dict(ydl_opts)
-        if "requested format is not available" in exc_text.lower():
-            log("Formato preferido no disponible; reintentando con el mejor formato disponible...")
-            retry_opts["format"] = "best"
-            retry_opts.pop("merge_output_format", None)
-        elif "subtitle" in exc_text.lower() or "caption" in exc_text.lower():
-            log("Fallo descargando subtitulos; reintentando sin subtitulos...")
-            retry_opts.pop("writesubtitles", None)
-            retry_opts.pop("writeautomaticsub", None)
-            retry_opts.pop("subtitleslangs", None)
-            retry_opts.pop("subtitlesformat", None)
-        else:
-            raise
-        with yt_dlp.YoutubeDL(retry_opts) as ydl:
-            info = ydl.extract_info(candidate.url, download=True)
+    media_only_preferred = dict(ydl_opts)
+    media_only_preferred.pop("writesubtitles", None)
+    media_only_preferred.pop("writeautomaticsub", None)
+    media_only_preferred.pop("subtitleslangs", None)
+    media_only_preferred.pop("subtitlesformat", None)
+    attempts.append(("Reintentando sin subtitulos con formato preferido...", media_only_preferred))
+
+    media_only_best = dict(media_only_preferred)
+    media_only_best["format"] = "best"
+    media_only_best.pop("merge_output_format", None)
+    attempts.append(("Reintentando con el mejor formato disponible...", media_only_best))
+
+    info: Optional[dict] = None
+    last_exc: Optional[Exception] = None
+    for idx, (label, opts) in enumerate(attempts, start=1):
+        try:
+            if idx > 1:
+                log(label)
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(candidate.url, download=True)
+            break
+        except Exception as exc:
+            last_exc = exc
+            exc_text = str(exc)
+            if "Sign in to confirm you" in exc_text or "not a bot" in exc_text:
+                hint = (
+                    "YouTube bloquea la descarga desde este servidor. "
+                    "Configura YTDLP_COOKIES_FILE apuntando a un cookies.txt valido."
+                )
+                raise RuntimeError(f"{exc_text}\n{hint}") from exc
+            if idx >= len(attempts):
+                raise
+
+    if info is None:
+        raise RuntimeError(str(last_exc or "No se pudo descargar el video."))
 
     requested = info.get("requested_downloads") or []
     video_file: Optional[Path] = None
