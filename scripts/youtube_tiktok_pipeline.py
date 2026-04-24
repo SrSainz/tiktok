@@ -472,26 +472,34 @@ HOOK_STOPWORDS = {
     "LOS",
     "ME",
     "MI",
+    "MOMENTO",
     "MUY",
     "NO",
     "O",
     "PARA",
     "PERO",
+    "PIERDAS",
     "POR",
     "QUE",
     "SE",
     "SERA",
     "SERIA",
     "SI",
+    "SIN",
     "SOMOS",
     "SON",
     "SOY",
+    "SUBTITULO",
+    "SUBTITULOS",
     "SU",
     "TE",
     "TU",
     "UN",
     "UNA",
     "UNO",
+    "VARIADO",
+    "VIDEO",
+    "VIDEOS",
     "Y",
     "YA",
 }
@@ -614,18 +622,29 @@ def build_fallback_caption_text(hook_text: str) -> str:
         return ""
 
     sentences = [part.strip(" .,:;-") for part in re.split(r"[.!?]+", clean) if part.strip()]
-    candidate = ""
-    if len(sentences) >= 2:
-        candidate = max(sentences[1:3], key=len)
-    elif sentences:
-        candidate = sentences[0]
+    generic_phrases = (
+        "no te lo pierdas",
+        "momento variado",
+        "sin subtitulos",
+        "sin subtítulos",
+        "clip de",
+    )
+    candidates = [
+        part
+        for part in (sentences or [clean])
+        if not any(phrase in part.lower() for phrase in generic_phrases)
+    ] or sentences or [clean]
+    candidate = max(candidates, key=lambda part: (score_text(part), min(len(part), 90)))
 
     words = re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9]+", candidate, flags=re.UNICODE)
     if len(words) < 2:
         words = re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9]+", clean, flags=re.UNICODE)
     if not words:
         return ""
-    return wrap_caption_lines([word.upper() for word in words[:5]], max_line_chars=18, max_lines=2)
+    selected = words[:5]
+    while selected and selected[-1].upper() in HOOK_STOPWORDS:
+        selected.pop()
+    return wrap_caption_lines([word.upper() for word in selected], max_line_chars=18, max_lines=2)
 
 
 def chunks_too_similar(a: str, b: str) -> bool:

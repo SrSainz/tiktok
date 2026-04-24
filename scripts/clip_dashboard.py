@@ -2058,20 +2058,26 @@ def generate_dashboard(config: DashboardConfig, log_fn: Callable[[str], None] = 
         poster_name = f"option_{idx:02}.jpg"
         out_video = dashboard_dir / preview_name
         poster_file = ""
+        source_channel = str(info.get("channel") or info.get("uploader") or "")
         tiktok_title, tiktok_caption, tiktok_hashtags = build_tiktok_copy(
             source_title=source_title,
-            source_channel=str(info.get("channel") or info.get("uploader") or ""),
+            source_channel=source_channel,
             hook=seg.hook,
             short_description=cand.short_description,
             why_it_may_work=cand.why_it_may_work,
             transcript_preview=cand.transcript_preview,
             signal_tags=cand.signal_tags,
         )
-        overlay_hook_text = " ".join(
-            part.strip()
-            for part in (tiktok_title, cand.short_description, cand.transcript_preview)
-            if part and part.strip()
+        generic_no_subtitles = (
+            not cand.transcript_preview.strip()
+            and "sin subtit" in cand.short_description.lower()
         )
+        overlay_parts = (
+            (source_title.replace("|", ". "),)
+            if generic_no_subtitles
+            else (tiktok_title, cand.short_description, cand.transcript_preview)
+        )
+        overlay_hook_text = " ".join(part.strip() for part in overlay_parts if part and part.strip())
         log_fn(f"Render option {idx}/{len(selected)} ({seg.start:.1f}s -> {seg.end:.1f}s)")
         subtitle_ass = job_dir / f"option_{idx:02}.ass"
         try:
