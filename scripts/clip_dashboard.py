@@ -698,6 +698,13 @@ def _build_caption_cta(signal_tags: List[str], hook: str, why_it_may_work: str) 
     return "Quédate hasta el giro final."
 
 
+def _clean_source_title_for_copy(source_title: str) -> str:
+    title = _strip_clip_prefix(str(source_title or "").replace("|", ":"))
+    title = re.sub(r"\s*:\s*", ": ", title)
+    title = re.sub(r"\s+", " ", title).strip(" .:-")
+    return _truncate_copy(title, 72)
+
+
 def build_tiktok_copy(
     *,
     source_title: str,
@@ -709,29 +716,37 @@ def build_tiktok_copy(
     signal_tags: List[str],
 ) -> tuple[str, str, List[str]]:
     clean_hook = _truncate_copy(_strip_clip_prefix(hook), 72)
+    generic_no_subtitles = not transcript_preview.strip() and "sin subtit" in short_description.lower()
+    source_title_clean = _clean_source_title_for_copy(source_title)
     focus_title = _truncate_copy(
         _strip_clip_prefix(extract_hook_focus_text(f"{short_description}. {transcript_preview}. {hook}")),
         48,
     )
-    lead_candidates = [
-        _truncate_copy(_strip_clip_prefix(short_description), 72),
-        _truncate_copy(_strip_clip_prefix(transcript_preview), 72),
-        _truncate_copy(_strip_clip_prefix(source_title), 72),
-    ]
-    if focus_title and len(focus_title) >= 8:
-        lead_candidates.insert(0, focus_title)
-    if clean_hook and not _looks_noisy_title(hook):
-        lead_candidates.insert(0, clean_hook)
+    if generic_no_subtitles:
+        lead_candidates = [source_title_clean]
+    else:
+        lead_candidates = [
+            _truncate_copy(_strip_clip_prefix(short_description), 72),
+            _truncate_copy(_strip_clip_prefix(transcript_preview), 72),
+            source_title_clean,
+        ]
+        if focus_title and len(focus_title) >= 8:
+            lead_candidates.insert(0, focus_title)
+        if clean_hook and not _looks_noisy_title(hook):
+            lead_candidates.insert(0, clean_hook)
     title = next((candidate for candidate in lead_candidates if candidate and len(candidate) >= 12), "")
     if not title:
-        title = _truncate_copy(_strip_clip_prefix(clean_hook or source_title or "Clip viral de la semana"), 72)
+        title = _truncate_copy(_strip_clip_prefix(clean_hook or source_title_clean or "Clip viral de la semana"), 72)
 
     title = _sentence_case(title).rstrip(" .")
     if title and title[-1] not in "!?" and (len(title.split()) > 3 or len(title) > 28):
         title = f"{title}..."
 
     caption_parts = [title] if title else []
-    cta_line = _build_caption_cta(signal_tags, hook, why_it_may_work)
+    if generic_no_subtitles:
+        cta_line = "Buen arranque de contexto, tension y caras antes del momento fuerte."
+    else:
+        cta_line = _build_caption_cta(signal_tags, hook, why_it_may_work)
     if cta_line and _norm_text(cta_line) not in _norm_text(" ".join(caption_parts)):
         caption_parts.append(cta_line)
     if source_channel and _norm_text(source_channel) not in _norm_text(" ".join(caption_parts)):
