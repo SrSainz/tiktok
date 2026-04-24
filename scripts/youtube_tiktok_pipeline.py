@@ -928,7 +928,7 @@ def locate_subtitle(info: dict, job_dir: Path, preferred_lang: str) -> Optional[
 def download_source_video(candidate: VideoCandidate, job_dir: Path, language: str) -> tuple[Path, Optional[Path], dict]:
     ffmpeg_bin = imageio_ffmpeg.get_ffmpeg_exe()
     ydl_opts = _apply_yt_auth_opts({
-        "format": "bv*[height<=1080]+ba/b[height<=1080]/b",
+        "format": "bv*[height<=1080]+ba/b[height<=1080]/bv*+ba/best",
         "outtmpl": str(job_dir / "%(id)s.%(ext)s"),
         "noplaylist": True,
         "merge_output_format": "mp4",
@@ -956,14 +956,18 @@ def download_source_video(candidate: VideoCandidate, job_dir: Path, language: st
             raise RuntimeError(f"{exc_text}\n{hint}") from exc
         # Common failure: subtitle/caption endpoints return 429.
         # Retry downloading only media so pipeline can still continue.
-        if "subtitle" not in exc_text.lower() and "caption" not in exc_text.lower():
-            raise
-        log("Fallo descargando subtitulos; reintentando sin subtitulos...")
         retry_opts = dict(ydl_opts)
-        retry_opts.pop("writesubtitles", None)
-        retry_opts.pop("writeautomaticsub", None)
-        retry_opts.pop("subtitleslangs", None)
-        retry_opts.pop("subtitlesformat", None)
+        if "requested format is not available" in exc_text.lower():
+            log("Formato preferido no disponible; reintentando con formato generico...")
+            retry_opts["format"] = "bv*+ba/best"
+        elif "subtitle" in exc_text.lower() or "caption" in exc_text.lower():
+            log("Fallo descargando subtitulos; reintentando sin subtitulos...")
+            retry_opts.pop("writesubtitles", None)
+            retry_opts.pop("writeautomaticsub", None)
+            retry_opts.pop("subtitleslangs", None)
+            retry_opts.pop("subtitlesformat", None)
+        else:
+            raise
         with yt_dlp.YoutubeDL(retry_opts) as ydl:
             info = ydl.extract_info(candidate.url, download=True)
 
