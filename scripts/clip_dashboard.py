@@ -480,6 +480,7 @@ class DashboardResult:
     source_title: str
     source_url: str
     options: List[ClipOption]
+    work_job_dir: str = ""
 
 
 def log(message: str) -> None:
@@ -2153,6 +2154,7 @@ def generate_dashboard(config: DashboardConfig, log_fn: Callable[[str], None] = 
         source_title=source_title,
         source_url=manifest["source_url"],
         options=options,
+        work_job_dir=str(job_dir),
     )
 
 

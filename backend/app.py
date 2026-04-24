@@ -551,6 +551,10 @@ def _path_last_modified_ts(path: Path) -> float:
 
 def _delete_old_entries(root: Path, cutoff_ts: float) -> int:
     deleted = 0
+    root = root.resolve()
+    protected_roots = {REPO_ROOT.resolve(), REPO_ROOT.parent.resolve(), Path.home().resolve()}
+    if root in protected_roots or root.name not in {"output", "work"}:
+        raise RuntimeError(f"retention_refused_unsafe_root: {root}")
     if not root.exists():
         return deleted
     for child in root.iterdir():
@@ -565,6 +569,24 @@ def _delete_old_entries(root: Path, cutoff_ts: float) -> int:
         except FileNotFoundError:
             continue
     return deleted
+
+
+def _delete_work_job_dir_safely(path_value: str) -> str | None:
+    if not path_value:
+        return None
+    candidate = Path(path_value).resolve()
+    work_root = WORK_DIR.resolve()
+    protected_roots = {work_root, REPO_ROOT.resolve(), OUTPUT_DIR.resolve(), DATA_DIR.resolve()}
+    if candidate in protected_roots:
+        return None
+    try:
+        candidate.relative_to(work_root)
+    except ValueError:
+        return None
+    if not candidate.exists():
+        return None
+    shutil.rmtree(candidate, ignore_errors=False)
+    return candidate.name
 
 
 def _purge_old_memory(cutoff: datetime) -> dict[str, int]:
@@ -2418,11 +2440,12 @@ def _run_job(job_id: str, req: CreateJobRequest) -> None:
         )
         result = generate_dashboard(config, log_fn=lambda m: _append_log(job_id, m))
         payload = _serialize_result(result)
-        work_job_dir = Path(getattr(result, "work_job_dir", "") or "")
+        work_job_dir = str(getattr(result, "work_job_dir", "") or "")
         if work_job_dir:
             try:
-                shutil.rmtree(work_job_dir, ignore_errors=False)
-                _append_log(job_id, f"Temporales borrados: {work_job_dir.name}")
+                deleted_name = _delete_work_job_dir_safely(work_job_dir)
+                if deleted_name:
+                    _append_log(job_id, f"Temporales borrados: {deleted_name}")
             except FileNotFoundError:
                 pass
             except Exception as cleanup_exc:
