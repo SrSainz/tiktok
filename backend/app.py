@@ -689,6 +689,19 @@ def _public_base_url(request: Request | None = None) -> str:
 
 
 def _serialize_candidate(c: Any) -> dict[str, Any]:
+    if isinstance(c, dict):
+        return {
+            "title": c.get("title"),
+            "url": c.get("url"),
+            "view_count": int(c.get("view_count") or 0),
+            "duration": c.get("duration"),
+            "channel": c.get("channel"),
+            "video_id": c.get("video_id"),
+            "upload_date": c.get("upload_date"),
+            "views_per_day": float(c.get("views_per_day") or 0.0),
+            "ai_score": float(c.get("ai_score") or 0.0),
+            "ai_reason": c.get("ai_reason") or "",
+        }
     return {
         "title": c.title,
         "url": c.url,
@@ -705,6 +718,11 @@ def _serialize_candidate(c: Any) -> dict[str, Any]:
 
 def _serialize_plan_entry(entry: dict[str, Any]) -> dict[str, Any]:
     candidate = entry.get("candidate")
+    alternatives = []
+    for alt in (entry.get("alternatives") or []):
+        alt_candidate = alt.get("candidate") if isinstance(alt, dict) and "candidate" in alt else alt
+        if alt_candidate is not None:
+            alternatives.append(_serialize_candidate(alt_candidate))
     return {
         "slot_key": entry.get("slot_key"),
         "slot_label": entry.get("slot_label"),
@@ -715,11 +733,7 @@ def _serialize_plan_entry(entry: dict[str, Any]) -> dict[str, Any]:
         "reason": entry.get("reason"),
         "summary": entry.get("summary"),
         "candidate": _serialize_candidate(candidate) if candidate else None,
-        "alternatives": [
-            _serialize_candidate(alt.get("candidate"))
-            for alt in (entry.get("alternatives") or [])
-            if alt.get("candidate") is not None
-        ],
+        "alternatives": alternatives,
     }
 
 
