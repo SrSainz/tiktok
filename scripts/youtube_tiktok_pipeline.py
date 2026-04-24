@@ -958,8 +958,9 @@ def download_source_video(candidate: VideoCandidate, job_dir: Path, language: st
         # Retry downloading only media so pipeline can still continue.
         retry_opts = dict(ydl_opts)
         if "requested format is not available" in exc_text.lower():
-            log("Formato preferido no disponible; reintentando con formato generico...")
-            retry_opts["format"] = "bv*+ba/best"
+            log("Formato preferido no disponible; reintentando con el mejor formato disponible...")
+            retry_opts["format"] = "best"
+            retry_opts.pop("merge_output_format", None)
         elif "subtitle" in exc_text.lower() or "caption" in exc_text.lower():
             log("Fallo descargando subtitulos; reintentando sin subtitulos...")
             retry_opts.pop("writesubtitles", None)
