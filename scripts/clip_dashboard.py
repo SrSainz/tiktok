@@ -350,10 +350,10 @@ def build_daily_post_plan(
         slots.append(
             {
                 "slot_key": slot["slot_key"],
-                "label": slot["label"],
+                "slot_label": slot["label"],
                 "publish_time": slot["publish_time"],
                 "strategy": slot["strategy"],
-                "primary": {
+                "candidate": {
                     "title": chosen.title,
                     "url": chosen.url,
                     "channel": chosen.channel,
@@ -378,6 +378,9 @@ def build_daily_post_plan(
         "date": date.today().isoformat(),
         "timezone": os.getenv("PLAN_TIMEZONE", "Europe/Madrid"),
         "mode": mode,
+        "posts_per_day": posts_per_day,
+        "reserve_count": reserve_count,
+        "slot_option_count": slot_option_count,
         "slots": slots,
         "reserves": reserves,
         "notes": "" if slots else "Sin candidatos suficientes para construir el plan de hoy.",
