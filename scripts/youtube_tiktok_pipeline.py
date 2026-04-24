@@ -431,14 +431,14 @@ def detect_active_crop_filter(ffmpeg_bin: str, input_video: Path, start: float) 
 def youtube_blur_compose_filter(width: int, height: int, crop_filter: str = "") -> str:
     foreground_height = _even(round(width * 9 / 16))
     return (
-        f"[0:v]{crop_filter}split=2[base_bg][base_fg];"
-        f"[base_bg]scale={width}:{height}:force_original_aspect_ratio=increase,"
-        f"crop={width}:{height},boxblur=22:12,"
+        "[0:v]split=2[base_bg][base_fg];"
+        f"[base_bg]{crop_filter}scale={width}:{height}:force_original_aspect_ratio=increase,"
+        f"crop={width}:{height},setsar=1,boxblur=22:12,"
         "eq=brightness=0.14:contrast=1.12:saturation=1.14:gamma=1.14[bg];"
-        f"[base_fg]scale={width}:{foreground_height}:force_original_aspect_ratio=increase,"
-        f"crop={width}:{foreground_height},setsar=1,"
+        f"[base_fg]scale={width}:{foreground_height}:force_original_aspect_ratio=decrease,"
+        f"pad={width}:{foreground_height}:(ow-iw)/2:(oh-ih)/2:black,setsar=1,"
         "eq=brightness=0.03:contrast=1.05:saturation=1.06:gamma=1.08[fg];"
-        "[bg][fg]overlay=(W-w)/2:(H-h)/2[vbase]"
+        "[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1[vbase]"
     )
 
 
@@ -584,6 +584,50 @@ def build_hook_ass_markup(hook_text: str) -> str:
     return r"{\1c&H0034FF3C&}" + ass_escape(lines[0]) + r"{\r}\N" + ass_escape(lines[1])
 
 
+def _ass_escape_linebreaks(text: str) -> str:
+    return r"\N".join(ass_escape(part) for part in text.split(r"\N"))
+
+
+def build_caption_ass_markup(text: str) -> str:
+    clean = re.sub(r"\s+", " ", text.replace(r"\N", " \\N ")).strip()
+    if not clean:
+        return ""
+
+    parts = clean.split()
+    if not parts:
+        return ""
+
+    lead_count = 2 if len(parts) > 1 and any(ch.isdigit() for ch in parts[0]) else 1
+    lead = " ".join(parts[:lead_count])
+    rest = " ".join(parts[lead_count:])
+    lead_markup = r"{\1c&H0034FF3C&}" + _ass_escape_linebreaks(lead) + r"{\r}"
+    if not rest:
+        return lead_markup
+    markup = lead_markup + " " + _ass_escape_linebreaks(rest)
+    return markup.replace(" " + r"\N" + " ", r"\N").replace(" " + r"\N", r"\N").replace(r"\N" + " ", r"\N")
+
+
+def build_fallback_caption_text(hook_text: str) -> str:
+    clean = re.sub(r"#\w+", "", hook_text or "")
+    clean = re.sub(r"\s+", " ", clean).strip(" .,:;-")
+    if not clean:
+        return ""
+
+    sentences = [part.strip(" .,:;-") for part in re.split(r"[.!?]+", clean) if part.strip()]
+    candidate = ""
+    if len(sentences) >= 2:
+        candidate = max(sentences[1:3], key=len)
+    elif sentences:
+        candidate = sentences[0]
+
+    words = re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9]+", candidate, flags=re.UNICODE)
+    if len(words) < 2:
+        words = re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9]+", clean, flags=re.UNICODE)
+    if not words:
+        return ""
+    return wrap_caption_lines([word.upper() for word in words[:5]], max_line_chars=18, max_lines=2)
+
+
 def chunks_too_similar(a: str, b: str) -> bool:
     a_words = set(re.findall(r"\w+", a.lower(), flags=re.UNICODE))
     b_words = set(re.findall(r"\w+", b.lower(), flags=re.UNICODE))
@@ -595,13 +639,14 @@ def chunks_too_similar(a: str, b: str) -> bool:
 
 def write_segment_ass(cues: List[CaptionCue], start: float, end: float, out_path: Path, hook_text: str = "") -> bool:
     events: List[str] = []
+    caption_event_count = 0
     last_clean = ""
     recent_chunks: List[str] = []
     segment_duration = max(0.1, end - start)
 
     hook_markup = build_hook_ass_markup(hook_text)
     if hook_markup:
-        hook_end = min(max(1.35, segment_duration * 0.24), 1.9, max(0.8, segment_duration - 0.2))
+        hook_end = min(max(3.0, segment_duration * 0.18), 4.8, max(1.2, segment_duration - 0.2))
         events.append(
             "Dialogue: 0,"
             f"{fmt_ass(0.00)},{fmt_ass(hook_end)},Hook,,0,0,0,,{hook_markup}"
@@ -650,12 +695,23 @@ def write_segment_ass(cues: List[CaptionCue], start: float, end: float, out_path
 
             events.append(
                 "Dialogue: 0,"
-                f"{fmt_ass(part_start)},{fmt_ass(part_end)},Cap,,0,0,0,,{ass_escape(chunk)}"
+                f"{fmt_ass(part_start)},{fmt_ass(part_end)},Cap,,0,0,0,,{build_caption_ass_markup(chunk)}"
             )
+            caption_event_count += 1
             recent_chunks.append(chunk_norm)
             recent_chunks = recent_chunks[-4:]
 
         last_clean = clean
+
+    if caption_event_count == 0 and hook_text.strip():
+        fallback_caption = build_fallback_caption_text(hook_text)
+        fallback_markup = build_caption_ass_markup(fallback_caption)
+        if fallback_markup:
+            fallback_end = min(max(2.0, segment_duration * 0.10), 3.6, max(1.2, segment_duration - 0.2))
+            events.append(
+                "Dialogue: 0,"
+                f"{fmt_ass(0.45)},{fmt_ass(fallback_end)},Cap,,0,0,0,,{fallback_markup}"
+            )
 
     if not events:
         return False
@@ -673,8 +729,8 @@ def write_segment_ass(cues: List[CaptionCue], start: float, end: float, out_path
             "Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,"
             "Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,"
             "MarginR,MarginV,Encoding",
-            "Style: Hook,Arial,74,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,4,0,8,96,96,180,1",
-            "Style: Cap,Arial,58,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,3,0,2,84,84,360,1",
+            "Style: Hook,Arial,74,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,4,0,8,96,96,300,1",
+            "Style: Cap,Arial,64,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,4,0,2,84,84,430,1",
             "",
             "[Events]",
             "Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text",

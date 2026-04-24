@@ -2074,13 +2074,10 @@ def generate_dashboard(config: DashboardConfig, log_fn: Callable[[str], None] = 
         )
         log_fn(f"Render option {idx}/{len(selected)} ({seg.start:.1f}s -> {seg.end:.1f}s)")
         subtitle_ass = job_dir / f"option_{idx:02}.ass"
-        if cues:
-            try:
-                if not write_segment_ass(cues, seg.start, seg.end, subtitle_ass, hook_text=overlay_hook_text):
-                    subtitle_ass = None
-            except Exception:
+        try:
+            if not write_segment_ass(cues, seg.start, seg.end, subtitle_ass, hook_text=overlay_hook_text):
                 subtitle_ass = None
-        else:
+        except Exception:
             subtitle_ass = None
         render_short(
             ffmpeg_bin=ffmpeg_bin,
