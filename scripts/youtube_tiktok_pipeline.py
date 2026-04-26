@@ -215,6 +215,26 @@ def _published_at_to_ymd(value: str | None) -> Optional[str]:
         return None
 
 
+def _timestamp_to_ymd(value: object) -> Optional[str]:
+    if value in (None, ""):
+        return None
+    try:
+        return datetime.utcfromtimestamp(float(value)).strftime("%Y%m%d")
+    except Exception:
+        return None
+
+
+def _extract_upload_date(info: dict, fallback: Optional[str] = None) -> Optional[str]:
+    return (
+        info.get("upload_date")
+        or info.get("modified_date")
+        or _published_at_to_ymd(info.get("published_at") or info.get("release_date"))
+        or _timestamp_to_ymd(info.get("timestamp"))
+        or _timestamp_to_ymd(info.get("release_timestamp"))
+        or fallback
+    )
+
+
 def _extract_google_api_error_message(payload: dict) -> str:
     err = payload.get("error") or {}
     if isinstance(err, dict):
@@ -811,7 +831,7 @@ def enrich_candidates(candidates: List[VideoCandidate], limit: int) -> List[Vide
                     channel=info.get("channel") or info.get("uploader") or c.channel,
                     video_id=info.get("id") or c.video_id,
                     category_id=str(info.get("categories", [None])[0] or c.category_id or ""),
-                    upload_date=info.get("upload_date") or c.upload_date,
+                    upload_date=_extract_upload_date(info, c.upload_date),
                     ai_score=c.ai_score,
                     ai_reason=c.ai_reason,
                 )
@@ -911,7 +931,7 @@ def discover_from_search(query: str, search_limit: int) -> List[VideoCandidate]:
                 duration=e.get("duration"),
                 channel=e.get("channel") or e.get("uploader") or "",
                 video_id=video_id,
-                upload_date=e.get("upload_date"),
+                upload_date=_extract_upload_date(e),
             )
         )
 
@@ -956,7 +976,7 @@ def discover_from_channels(channels: List[str], per_channel_scan: int) -> List[V
                     duration=e.get("duration"),
                     channel=e.get("channel") or e.get("uploader") or info.get("uploader") or "",
                     video_id=video_id,
-                    upload_date=e.get("upload_date"),
+                    upload_date=_extract_upload_date(e),
                 )
             )
 
