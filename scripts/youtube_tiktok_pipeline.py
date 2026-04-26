@@ -809,33 +809,40 @@ def enrich_candidates(candidates: List[VideoCandidate], limit: int) -> List[Vide
         "retries": 1,
         "extractor_retries": 1,
     })
+    opts_no_cookies = dict(opts)
+    opts_no_cookies.pop("cookiefile", None)
     out: List[VideoCandidate] = []
     deadline = time.monotonic() + 90.0
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        for c in candidates[:limit]:
-            if time.monotonic() > deadline:
-                out.append(c)
-                continue
+    for c in candidates[:limit]:
+        if time.monotonic() > deadline:
+            out.append(c)
+            continue
+        info = None
+        for attempt_opts in (opts, opts_no_cookies):
             try:
-                info = ydl.extract_info(c.url, download=False)
+                with yt_dlp.YoutubeDL(attempt_opts) as ydl:
+                    info = ydl.extract_info(c.url, download=False)
+                break
             except Exception:
-                out.append(c)
-                continue
+                info = None
+        if not info:
+            out.append(c)
+            continue
 
-            out.append(
-                VideoCandidate(
-                    title=info.get("title") or c.title,
-                    url=info.get("webpage_url") or c.url,
-                    view_count=int(info.get("view_count") or c.view_count or 0),
-                    duration=info.get("duration") or c.duration,
-                    channel=info.get("channel") or info.get("uploader") or c.channel,
-                    video_id=info.get("id") or c.video_id,
-                    category_id=str(info.get("categories", [None])[0] or c.category_id or ""),
-                    upload_date=_extract_upload_date(info, c.upload_date),
-                    ai_score=c.ai_score,
-                    ai_reason=c.ai_reason,
-                )
+        out.append(
+            VideoCandidate(
+                title=info.get("title") or c.title,
+                url=info.get("webpage_url") or c.url,
+                view_count=int(info.get("view_count") or c.view_count or 0),
+                duration=info.get("duration") or c.duration,
+                channel=info.get("channel") or info.get("uploader") or c.channel,
+                video_id=info.get("id") or c.video_id,
+                category_id=str(info.get("categories", [None])[0] or c.category_id or ""),
+                upload_date=_extract_upload_date(info, c.upload_date),
+                ai_score=c.ai_score,
+                ai_reason=c.ai_reason,
             )
+        )
 
     if len(candidates) > limit:
         out.extend(candidates[limit:])
