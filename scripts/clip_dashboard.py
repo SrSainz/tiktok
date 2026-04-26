@@ -1765,6 +1765,80 @@ def extract_poster_frame(ffmpeg_bin: str, input_video: Path, output_image: Path,
         raise RuntimeError((proc_fb.stderr or proc.stderr or "No se pudo generar poster.")[-1200:])
 
 
+def transcribe_video_to_cues(
+    *,
+    ffmpeg_bin: str,
+    source_video: Path,
+    job_dir: Path,
+    language: str,
+    max_seconds: int,
+    log_fn: Callable[[str], None],
+) -> List[CaptionCue]:
+    enabled = os.getenv("WHISPER_FALLBACK_ENABLED", "1").strip().lower()
+    if enabled in {"0", "false", "no", "off"}:
+        return []
+
+    try:
+        from faster_whisper import WhisperModel
+    except Exception as exc:
+        log_fn(f"Whisper no disponible para subtitulos fallback: {exc}")
+        return []
+
+    audio_path = job_dir / f"{source_video.stem}.whisper.wav"
+    cmd = [
+        ffmpeg_bin,
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        str(source_video.name),
+        "-t",
+        str(max(20, max_seconds)),
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-c:a",
+        "pcm_s16le",
+        str(audio_path.name),
+    ]
+    try:
+        subprocess.run(cmd, cwd=source_video.parent, check=True, capture_output=True, text=True)
+    except Exception as exc:
+        log_fn(f"No se pudo preparar audio para Whisper: {exc}")
+        return []
+
+    model_name = os.getenv("WHISPER_MODEL", "base").strip() or "base"
+    device = os.getenv("WHISPER_DEVICE", "cpu").strip() or "cpu"
+    compute_type = os.getenv("WHISPER_COMPUTE_TYPE", "int8").strip() or "int8"
+    lang = (language or "es").split("-")[0].strip() or "es"
+    log_fn(f"Generando subtitulos con Whisper ({model_name}, {max_seconds}s)...")
+    try:
+        model = WhisperModel(model_name, device=device, compute_type=compute_type)
+        segments, _info = model.transcribe(
+            str(audio_path),
+            language=lang,
+            beam_size=1,
+            vad_filter=True,
+            word_timestamps=False,
+        )
+        cues: List[CaptionCue] = []
+        for segment in segments:
+            text = re.sub(r"\s+", " ", str(getattr(segment, "text", "") or "")).strip()
+            if not text:
+                continue
+            start = max(0.0, float(getattr(segment, "start", 0.0) or 0.0))
+            end = max(start + 0.2, float(getattr(segment, "end", start + 0.2) or start + 0.2))
+            cues.append(CaptionCue(start=start, end=end, text=text))
+        log_fn(f"Subtitulos Whisper generados: {len(cues)} segmentos.")
+        return cues
+    except Exception as exc:
+        log_fn(f"Whisper fallo generando subtitulos: {exc}")
+        return []
+
+
 def write_dashboard_html(
     out_html: Path,
     source_title: str,
@@ -2027,19 +2101,37 @@ def generate_dashboard(config: DashboardConfig, log_fn: Callable[[str], None] = 
     source_duration = float(info.get("duration") or 0.0)
     source_slug = slugify(source_title, max_len=55)
 
-    cues: List[CaptionCue] = []
-    if subtitle_file and subtitle_file.exists() and subtitle_file.suffix.lower() == ".vtt":
-        cues = parse_vtt(subtitle_file)
-        log_fn(f"Subtitulos encontrados: {subtitle_file.name}")
-    else:
-        log_fn("No hay subtitulos: opciones se repartiran por duracion.")
-
     if source_duration <= 0:
         raise RuntimeError("No se pudo detectar duracion del video.")
 
-    # Signal analysis for stronger clip ranking.
+    # Signal/transcription analysis is intentionally capped so scheduled batches
+    # stay fast and predictable on the NAS CPU.
     analysis_cap = max(60, min(300, int(os.getenv("CLIP_ANALYSIS_MAX_SECONDS", "150"))))
     analysis_seconds = int(min(max(60.0, source_duration), float(analysis_cap)))
+
+    cues: List[CaptionCue] = []
+    if subtitle_file and subtitle_file.exists() and subtitle_file.suffix.lower() == ".vtt":
+        cues = parse_vtt(subtitle_file)
+        if cues:
+            log_fn(f"Subtitulos encontrados: {subtitle_file.name} ({len(cues)} segmentos)")
+        else:
+            log_fn(f"Subtitulos VTT vacios: {subtitle_file.name}")
+    else:
+        log_fn("No hay subtitulos VTT de YouTube.")
+
+    if not cues:
+        cues = transcribe_video_to_cues(
+            ffmpeg_bin=ffmpeg_bin,
+            source_video=source_video,
+            job_dir=job_dir,
+            language=config.language,
+            max_seconds=analysis_seconds,
+            log_fn=log_fn,
+        )
+    if not cues:
+        log_fn("No hay subtitulos reales: opciones se repartiran por audio/ritmo visual.")
+
+    # Signal analysis for stronger clip ranking.
     log_fn(f"Analizando dinamica de audio y ritmo visual (primeros {analysis_seconds}s)...")
     try:
         rms_by_second = analyze_audio_energy(ffmpeg_bin, source_video, max_seconds=analysis_seconds)

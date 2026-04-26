@@ -749,7 +749,7 @@ def write_segment_ass(cues: List[CaptionCue], start: float, end: float, out_path
             "Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,"
             "MarginR,MarginV,Encoding",
             "Style: Hook,Arial,74,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,4,0,8,96,96,300,1",
-            "Style: Cap,Arial,64,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,4,0,2,84,84,430,1",
+            "Style: Cap,Arial,64,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,4,0,2,84,84,520,1",
             "",
             "[Events]",
             "Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text",
@@ -1052,6 +1052,7 @@ def locate_subtitle(info: dict, job_dir: Path, preferred_lang: str) -> Optional[
 
 def download_source_video(candidate: VideoCandidate, job_dir: Path, language: str) -> tuple[Path, Optional[Path], dict]:
     ffmpeg_bin = imageio_ffmpeg.get_ffmpeg_exe()
+    subtitle_langs = list(dict.fromkeys([language, "es", "es-ES", "es-419", "en", "en-US"]))
     ydl_opts = _apply_yt_auth_opts({
         "format": "bv*[height<=1080]+ba/b[height<=1080]/bv*+ba/best",
         "outtmpl": str(job_dir / "%(id)s.%(ext)s"),
@@ -1059,7 +1060,7 @@ def download_source_video(candidate: VideoCandidate, job_dir: Path, language: st
         "merge_output_format": "mp4",
         "writesubtitles": True,
         "writeautomaticsub": True,
-        "subtitleslangs": [language],
+        "subtitleslangs": subtitle_langs,
         "subtitlesformat": "vtt",
         "restrictfilenames": True,
         "quiet": True,
@@ -1136,6 +1137,26 @@ def download_source_video(candidate: VideoCandidate, job_dir: Path, language: st
         raise RuntimeError("No se pudo encontrar el video descargado.")
 
     sub_file = locate_subtitle(info, job_dir, preferred_lang=language)
+    if not sub_file:
+        sub_opts = _apply_yt_auth_opts({
+            "outtmpl": str(job_dir / "%(id)s.%(ext)s"),
+            "noplaylist": True,
+            "skip_download": True,
+            "writesubtitles": True,
+            "writeautomaticsub": True,
+            "subtitleslangs": subtitle_langs,
+            "subtitlesformat": "vtt",
+            "restrictfilenames": True,
+            "quiet": True,
+            "no_warnings": True,
+            "noprogress": True,
+        })
+        try:
+            with yt_dlp.YoutubeDL(sub_opts) as ydl:
+                sub_info = ydl.extract_info(candidate.url, download=True)
+            sub_file = locate_subtitle(sub_info or info, job_dir, preferred_lang=language)
+        except Exception:
+            sub_file = locate_subtitle(info, job_dir, preferred_lang=language)
     return video_file, sub_file, info
 
 
