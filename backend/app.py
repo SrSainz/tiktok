@@ -535,17 +535,21 @@ def _path_last_modified_ts(path: Path) -> float:
     latest = path.stat().st_mtime
     if not path.is_dir():
         return latest
-    for root, dirs, files in os.walk(path):
-        for name in dirs:
-            try:
-                latest = max(latest, (Path(root) / name).stat().st_mtime)
-            except Exception:
-                continue
-        for name in files:
-            try:
-                latest = max(latest, (Path(root) / name).stat().st_mtime)
-            except Exception:
-                continue
+    pending = [path]
+    while pending:
+        current = pending.pop()
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    try:
+                        stat = entry.stat()
+                        latest = max(latest, stat.st_mtime)
+                        if entry.is_dir(follow_symlinks=False):
+                            pending.append(Path(entry.path))
+                    except Exception:
+                        continue
+        except Exception:
+            continue
     return latest
 
 
