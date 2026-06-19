@@ -195,19 +195,14 @@ def _save_used_video_history(entries: list[dict[str, Any]]) -> None:
     USED_VIDEO_HISTORY_FILE.write_text(json.dumps(trimmed, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def recent_used_video_keys() -> set[str]:
-    entries = _load_used_video_history()
-    try:
-        _save_used_video_history(entries)
-    except Exception:
-        pass
+def _recent_used_video_keys_from_entries(entries: list[dict[str, Any]]) -> set[str]:
     return {str(item.get("video_key") or "").strip() for item in entries if str(item.get("video_key") or "").strip()}
 
 
-def recent_used_channel_keys() -> set[str]:
+def _recent_used_channel_keys_from_entries(entries: list[dict[str, Any]]) -> set[str]:
     cutoff_ts = (datetime.utcnow() - timedelta(hours=USED_CREATOR_COOLDOWN_HOURS)).timestamp()
     keys: set[str] = set()
-    for item in _load_used_video_history():
+    for item in entries:
         used_at_raw = str(item.get("used_at") or "").strip()
         if not used_at_raw:
             continue
@@ -221,6 +216,19 @@ def recent_used_channel_keys() -> set[str]:
         if channel:
             keys.add(channel)
     return keys
+
+
+def recent_used_video_keys() -> set[str]:
+    entries = _load_used_video_history()
+    try:
+        _save_used_video_history(entries)
+    except Exception:
+        pass
+    return _recent_used_video_keys_from_entries(entries)
+
+
+def recent_used_channel_keys() -> set[str]:
+    return _recent_used_channel_keys_from_entries(_load_used_video_history())
 
 
 def record_used_video(
@@ -311,8 +319,13 @@ def build_daily_post_plan(
         mode=mode,
         log_fn=log_fn,
     )
-    recent_keys = recent_used_video_keys()
-    recent_channels = recent_used_channel_keys()
+    recent_entries = _load_used_video_history()
+    try:
+        _save_used_video_history(recent_entries)
+    except Exception:
+        pass
+    recent_keys = _recent_used_video_keys_from_entries(recent_entries)
+    recent_channels = _recent_used_channel_keys_from_entries(recent_entries)
     fresh = [c for c in candidates if _candidate_video_key(c) not in recent_keys and str(c.channel or "").strip().lower() not in recent_channels]
     if len(fresh) >= max(posts_per_day, 1):
         candidates = fresh
